@@ -27,10 +27,8 @@ def _cmd_run(args) -> int:
     print(solver.summary())
     if cfg.run.restart_file:
         solver.read_restart(cfg.case_dir / cfg.run.restart_file)
-    print(f"wrote {solver.write_output()}")
-    if cfg.run.steps > 0:
-        print("time integration is not implemented yet (Phase 1)", file=sys.stderr)
-        return 2
+    solver.run()
+    print(f"finished at step {solver.step}, t = {solver.time:.6g}; output in {solver.out_dir}")
     return 0
 
 

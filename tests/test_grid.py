@@ -4,51 +4,10 @@ orientation and periodicity, ghost geometry, partitioning and halo exchange."""
 import numpy as np
 import pytest
 
-from wmles_wrap.config import config_from_dict
 from wmles_wrap.grid.metrics import compute_metrics
-from wmles_wrap.io.plot3d import write_plot3d
 from wmles_wrap.precision import get_precision
-from wmles_wrap.solver import Solver
 
-LX, LY, LZ = 2.0, 1.0, 1.0
-
-
-def _perturbed_box(ni, nj, nk, amp=0.04):
-    """Curvilinear grid on [0,LX]x[0,LY]x[0,LZ]; periodic in x,z, flat walls at y=0,LY."""
-    x, y, z = np.meshgrid(np.linspace(0, LX, ni), np.linspace(0, LY, nj), np.linspace(0, LZ, nk), indexing="ij")
-    s = np.sin(2 * np.pi * x / LX) * np.sin(2 * np.pi * z / LZ) * np.sin(np.pi * y / LY)
-    c = np.cos(2 * np.pi * x / LX) * np.sin(np.pi * y / LY) * np.sin(2 * np.pi * z / LZ)
-    return np.stack([x + amp * s, y + amp * c * 0.5, z + amp * s * c], axis=-1)
-
-
-def _field(xc):
-    """Smooth function periodic in x and z (so periodic ghost values are well defined)."""
-    x, y, z = xc[..., 0], xc[..., 1], xc[..., 2]
-    return np.sin(2 * np.pi * x / LX) * np.cos(2 * np.pi * z / LZ) + y**2 + 0.3 * np.cos(2 * np.pi * x / LX) * y
-
-
-def _two_block_case(tmp_path, partitions, flip_handedness=False):
-    g = _perturbed_box(17, 9, 11)
-    a, b = g[:9], g[8:]  # split along x, shared node plane at i = 8
-    # reorient block 1: cyclic axis permutation (i,j,k) -> (j,k,i) and flip two axes
-    b = b.transpose(1, 2, 0, 3)[::-1, :, ::-1]
-    if flip_handedness:
-        b = b[:, ::-1]  # left-handed -> solver must reverse k
-    write_plot3d(tmp_path / "g.p3d", [np.ascontiguousarray(a), np.ascontiguousarray(b)])
-    cfg = config_from_dict(
-        {
-            "grid": {"file": "g.p3d"},
-            "flow": {"mach": 0.3, "reynolds": 1e4, "temperature": 300.0},
-            "boundaries": [
-                {"faces": ["jmin", "jmax"], "type": "wall", "block": 0},
-                {"faces": ["imin", "imax"], "type": "wall", "block": 1},
-            ],
-            "periodic": [{"translation": [LX, 0, 0]}, {"translation": [0, 0, LZ]}],
-            "parallel": {"devices": ["cpu"], "partitions": partitions},
-        },
-        case_dir=tmp_path,
-    )
-    return Solver(cfg)
+from helpers import LX, LY, LZ, _field, _perturbed_box, _two_block_case  # noqa: E402
 
 
 def test_unit_cube_metrics():
@@ -154,3 +113,32 @@ def test_output_vtm(tmp_path):
     assert mb[0].n_cells == solver.subs[0].ncells
     assert np.allclose(mb[0].cell_data["rho"], 1.0)
     assert (solver.out_dir / "flow.pvd").exists()
+
+
+@pytest.mark.parametrize("partitions", [1, 2, 5])
+def test_all_ghosts_filled_periodic_box(tmp_path, partitions):
+    """Fully periodic box: halo exchange alone must fill every ghost cell, incl. edges/corners."""
+    from wmles_wrap.config import config_from_dict
+    from wmles_wrap.io.plot3d import write_plot3d
+    from wmles_wrap.solver import Solver
+
+    x = np.stack(np.meshgrid(*(np.linspace(0, 1, 9),) * 3, indexing="ij"), axis=-1)
+    write_plot3d(tmp_path / "box.p3d", [x])
+    cfg = config_from_dict(
+        {
+            "grid": {"file": "box.p3d"},
+            "flow": {"mach": 0.3, "reynolds": 1e4, "temperature": 300.0},
+            "periodic": [{"translation": t} for t in ([1, 0, 0], [0, 1, 0], [0, 0, 1])],
+            "parallel": {"devices": ["cpu"], "partitions": partitions},
+        },
+        case_dir=tmp_path,
+    )
+    solver = Solver(cfg)
+    ng = solver.ng
+    for s in solver.subs:
+        U = np.full(s.padded_shape_cells(ng) + (5,), np.nan)
+        U[ng:-ng, ng:-ng, ng:-ng] = 1.0
+        solver.set_state(s.id, U)
+    solver.halo.exchange(solver.U)
+    for s in solver.subs:
+        assert not np.isnan(solver.U[s.id].numpy()).any(), s.id

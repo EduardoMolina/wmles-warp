@@ -214,6 +214,8 @@ class HaloMap:
     donor: int
     recv_idx: np.ndarray  # (N, 3) int32 padded indices in recv
     donor_idx: np.ndarray  # (N, 3) int32 padded indices in donor
+    stage: int = 0  # number of directions in which the donor cell is a ghost (0: interior);
+    #                 stages >= 1 run after the boundary conditions, in increasing order
 
 
 def build_halo_maps(subs: list[SubBlock], interfaces: list[Interface], ng: int) -> list[HaloMap]:
@@ -224,13 +226,16 @@ def build_halo_maps(subs: list[SubBlock], interfaces: list[Interface], ng: int) 
     tangential extent) is mapped to donor *parent* cell indices; each donor cell is then
     owned by the donor sub-block whose interior contains it, or, for edge/corner cells beyond
     a physical boundary, by a sub-block whose padded range contains it (BC-filled ghosts).
+    Such entries form exchange stage g = number of directions in which the donor cell is a
+    ghost; stages 1, 2 run after the boundary conditions, so every edge/corner ghost reads only
+    cells completed earlier and results do not depend on the partitioning.
     """
     itf_by_face = {(i.recv, i.recv_face): i for i in interfaces}
     by_parent: dict[int, list[SubBlock]] = {}
     for s in subs:
         by_parent.setdefault(s.parent, []).append(s)
 
-    pieces: dict[tuple[int, int], list[tuple[np.ndarray, np.ndarray]]] = {}
+    pieces: dict[tuple[int, int, int], list[tuple[np.ndarray, np.ndarray]]] = {}
     for s in subs:
         lo_s = np.asarray(s.lo)
         for f in range(6):
@@ -243,26 +248,48 @@ def build_halo_maps(subs: list[SubBlock], interfaces: list[Interface], ng: int) 
                 dpar, dparent = itf.map_cells(gpar), itf.donor
             else:
                 dpar, dparent = gpar, s.parent
+            cands = by_parent[dparent]
+            # pass 0: donor cell interior to some sub-block (unique owner)
             todo = np.ones(len(slab), dtype=bool)
-            for pad in (0, ng):  # interior ownership first, then padded (ghost) ownership
-                for t in by_parent[dparent]:
-                    lo_t = np.asarray(t.lo)
-                    hi_t = np.asarray(t.hi)  # node index; cells lo..hi-1
-                    inside = todo & np.all((dpar >= lo_t - pad) & (dpar < hi_t + pad), axis=1)
-                    if pad and t.id == s.id:
-                        inside &= False  # never copy own ghosts onto own ghosts
-                    if not inside.any():
-                        continue
-                    pieces.setdefault((s.id, t.id), []).append(
-                        (slab[inside] + ng, dpar[inside] - lo_t + ng)
-                    )
+            for t in cands:
+                lo_t, hi_t = np.asarray(t.lo), np.asarray(t.hi)  # node indices; cells lo..hi-1
+                inside = todo & np.all((dpar >= lo_t) & (dpar < hi_t), axis=1)
+                if inside.any():
+                    pieces.setdefault((s.id, t.id, 0), []).append((slab[inside] + ng, dpar[inside] - lo_t + ng))
                     todo &= ~inside
+            if not todo.any():
+                continue
+            # pass 1: donor cell lies beyond a physical boundary -> take it from the sub-block in
+            # whose padded range it is a ghost in the fewest directions (filled by stage 0 or BCs),
+            # never from the receiving cell itself
+            rem = np.flatnonzero(todo)
+            best = np.full(len(rem), 4)
+            owner = np.full(len(rem), -1)
+            dp = dpar[rem]
+            for ti, t in enumerate(cands):
+                lo_t, hi_t = np.asarray(t.lo), np.asarray(t.hi)
+                inpad = np.all((dp >= lo_t - ng) & (dp < hi_t + ng), axis=1)
+                ghostness = np.sum((dp < lo_t) | (dp >= hi_t), axis=1)
+                if t.id == s.id:
+                    inpad &= ~np.all(dp - lo_t == slab[rem], axis=1)
+                better = inpad & (ghostness < best)
+                best[better] = ghostness[better]
+                owner[better] = ti
+            for ti in np.unique(owner[owner >= 0]):
+                t = cands[ti]
+                for g in np.unique(best[owner == ti]):
+                    sel = rem[(owner == ti) & (best == g)]
+                    # stage = ghostness of the donor cell: it is complete after earlier stages/BCs
+                    pieces.setdefault((s.id, t.id, int(g)), []).append(
+                        (slab[sel] + ng, dpar[sel] - np.asarray(t.lo) + ng)
+                    )
     maps = []
-    for (r, d), lst in sorted(pieces.items()):
+    for (r, d, stage), lst in sorted(pieces.items()):
         maps.append(
             HaloMap(
                 recv=r,
                 donor=d,
+                stage=stage,
                 recv_idx=np.concatenate([a for a, _ in lst]).astype(np.int32),
                 donor_idx=np.concatenate([b for _, b in lst]).astype(np.int32),
             )

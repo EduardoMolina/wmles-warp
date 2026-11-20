@@ -13,7 +13,7 @@ flow:
 
 gas: {gamma: 1.4, prandtl: 0.72, prandtl_t: 0.9, viscosity: sutherland}
 
-numerics: {precision: float64, flux: keep_pe, sensor: ducros, dissipation: roe, cfl: 0.8, rk: ssprk3}
+numerics: {precision: float64, flux: keep_pe, sensor: ducros_pressure, dissipation: roe, cfl: 0.8, rk: ssprk3}
 
 sgs: {model: vreman, c: 0.07}
 

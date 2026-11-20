@@ -25,6 +25,7 @@ from ..grid.connectivity import HaloMap
 class _Pair:
     donor: int
     recv: int
+    stage: int
     donor_device: str
     recv_device: str
     n: int
@@ -75,11 +76,11 @@ class HaloExchanger:
         """``force_staged`` routes same-device pairs through the pack/copy/unpack path used
         between devices (lets the multi-GPU code path be tested on a single device)."""
         self.subs = {s.id: s for s in subs}
-        grouped: dict[tuple[int, int], list[HaloMap]] = defaultdict(list)
+        grouped: dict[tuple[int, int, int], list[HaloMap]] = defaultdict(list)
         for m in maps:
-            grouped[(m.donor, m.recv)].append(m)
+            grouped[(m.stage, m.donor, m.recv)].append(m)
         self.pairs: list[_Pair] = []
-        for (d, r), ms in sorted(grouped.items()):
+        for (stage, d, r), ms in sorted(grouped.items()):
             didx = np.concatenate([m.donor_idx for m in ms])
             ridx = np.concatenate([m.recv_idx for m in ms])
             if len(didx) == 0:
@@ -89,6 +90,7 @@ class HaloExchanger:
                 _Pair(
                     donor=d,
                     recv=r,
+                    stage=stage,
                     donor_device=dd,
                     recv_device=rd,
                     n=len(didx),
@@ -100,9 +102,18 @@ class HaloExchanger:
                 )
             )
 
-    def exchange(self, field_arrays: dict[int, wp.array]) -> None:
-        """Fill ghost cells of every sub-block array in ``field_arrays`` (sub id -> padded array)."""
+    def exchange(self, field_arrays: dict[int, wp.array], stages: tuple[int, ...] = (0, 1, 2)) -> None:
+        """Fill ghost cells of every sub-block array in ``field_arrays`` (sub id -> padded array).
+
+        Stage 0 copies from donor interior cells; stages 1, 2 copy edge/corner ghosts whose donor
+        cells are ghosts in 1 or 2 directions (run them after applying BCs, in order)."""
+        for stage in stages:
+            self._exchange_stage(field_arrays, stage)
+
+    def _exchange_stage(self, field_arrays: dict[int, wp.array], stage: int) -> None:
         for p in self.pairs:
+            if p.stage != stage:
+                continue
             src, dst = field_arrays[p.donor], field_arrays[p.recv]
             gather, scatter, copy_direct = _kernels(src.dtype)
             if p.recv_idx_on_donor is not None:

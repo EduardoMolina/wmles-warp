@@ -1,7 +1,7 @@
 """Solver orchestrator.
 
-Phase 0 scope: grid loading, decomposition, connectivity, metrics, state allocation,
-halo exchange, output and restart. The time integration loop is added in Phase 1.
+Grid loading, decomposition, connectivity, metrics, state allocation, halo exchange,
+time integration loop, output and restart.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from .io.extrude import extrude_block
 from .io.output import SnapshotWriter
 from .io.plot3d import read_plot3d
 from .io.restart import read_restart, write_restart
+from .numerics.integrator import Integrator
 from .parallel.devices import enable_peer_access, init_warp, resolve_devices, resolve_partitions
 from .parallel.halo import HaloExchanger
 from .physics.gas import GasModel
@@ -95,6 +96,7 @@ class Solver:
         self.halo = HaloExchanger(self.subs, build_halo_maps(self.subs, self.interfaces, self.ng))
         self.U = {s.id: self._alloc_state(s) for s in self.subs}
         self.init_freestream()
+        self.integrator = Integrator(self)
         self.setup_time = _time.perf_counter() - t0
 
     # ---- state ------------------------------------------------------------------------------
@@ -111,6 +113,62 @@ class Solver:
         for s in self.subs:
             arr = np.broadcast_to(q, s.padded_shape_cells(self.ng) + (5,))
             self.set_state(s.id, np.ascontiguousarray(arr))
+
+    def set_primitive_field(self, fn) -> None:
+        """Initialize from ``fn(xc) -> W`` with xc (..., 3) cell centroids and W (..., 5) =
+        [rho, u, v, w, p] (nondimensional)."""
+        for s in self.subs:
+            xc = self.metrics[s.id].xc.numpy().astype(np.float64)
+            W = np.asarray(fn(xc), dtype=np.float64)
+            rho, p = W[..., 0], W[..., 4]
+            T = p / (rho * self.gas.R)
+            self.set_state(s.id, self.gas.conservative(rho, W[..., 1], W[..., 2], W[..., 3], T))
+
+    def advance(self, nsteps: int | None = None, t_end: float | None = None, log_every: int = 0) -> None:
+        """Advance ``nsteps`` steps and/or until ``t_end`` (final step clipped to hit t_end)."""
+        cfg = self.cfg
+        n = 0
+        t_wall = _time.perf_counter()
+        while (nsteps is None or n < nsteps) and (t_end is None or self.time < t_end - 1e-14 * max(1.0, t_end)):
+            dt = cfg.run.dt if cfg.run.dt is not None else self.integrator.compute_dt(cfg.numerics.cfl)
+            if t_end is not None:
+                dt = min(dt, t_end - self.time)
+            self.integrator.step(dt, self.time)
+            self.time += dt
+            self.step += 1
+            n += 1
+            if log_every and self.step % log_every == 0:
+                res = self.integrator.residual_norms()
+                el = _time.perf_counter() - t_wall
+                ncell = sum(s.ncells for s in self.subs)
+                log.info("step %8d  t %.6e  dt %.3e  res(rho,rhoE) %.3e %.3e  %.3g Mcell-steps/s",
+                         self.step, self.time, dt, res[0], res[4], ncell * n / el / 1e6)
+                if not np.all(np.isfinite(res)):
+                    raise FloatingPointError(f"non-finite residual at step {self.step}")
+            if nsteps is None and t_end is None:
+                break
+
+    def run(self) -> None:
+        """Run according to cfg.run: steps/t_end, output, restart cadence."""
+        cfg = self.cfg.run
+        writer = SnapshotWriter(self.out_dir)
+        self.write_output(writer)
+        target = cfg.steps if cfg.steps > 0 else None
+        chunk_points = [c for c in (cfg.output_every, cfg.restart_every) if c > 0]
+        while True:
+            done = (target is not None and self.step >= target) or (
+                cfg.t_end is not None and self.time >= cfg.t_end - 1e-14 * max(1.0, cfg.t_end))
+            if done or (target is None and cfg.t_end is None):
+                break
+            n = min([c - self.step % c for c in chunk_points] + ([target - self.step] if target else []) or [10**9])
+            self.advance(nsteps=n, t_end=cfg.t_end, log_every=cfg.log_every)
+            if cfg.output_every and self.step % cfg.output_every == 0:
+                self.write_output(writer)
+            if cfg.restart_every and self.step % cfg.restart_every == 0:
+                self.write_restart(self.out_dir / f"restart_{self.step:08d}.npz")
+        if not cfg.output_every or self.step % cfg.output_every != 0:
+            self.write_output(writer)
+        self.write_restart(self.out_dir / "restart_final.npz")
 
     def interior(self, a: np.ndarray) -> np.ndarray:
         g = self.ng

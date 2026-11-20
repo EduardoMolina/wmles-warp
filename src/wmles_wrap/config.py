@@ -62,11 +62,16 @@ class GasCfg:
 class NumericsCfg:
     precision: str = "float64"
     flux: str = "keep_pe"
-    sensor: str = "ducros"
+    sensor: str = "ducros_pressure"  # ducros_pressure | ducros | none
     dissipation: str = "roe"
     cfl: float = 0.8
     rk: str = "ssprk3"
     ghost_layers: int = 2
+    viscous: bool = True  # False -> Euler equations
+    sensor_threshold: float = 0.0  # dissipation only where Ducros theta exceeds this
+    sensor_eps: float = 1e-12  # regularization of the Ducros sensor denominator
+    sensor_pressure_gain: float = 10.0  # phi ~ min(1, gain * |d2p| / sum p) in ducros_pressure
+    entropy_fix: float = 0.1  # Harten entropy fix (fraction of sound speed) for Roe
 
 
 @dataclass
@@ -109,13 +114,17 @@ class PeriodicCfg:
 
 @dataclass
 class ForcingCfg:
-    type: str = "none"  # none | constant_mass_flux
+    type: str = "none"  # none | body_force | constant_mass_flux
     direction: list[float] = field(default_factory=lambda: [1.0, 0.0, 0.0])
+    value: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])  # body_force (per unit mass)
 
 
 @dataclass
 class RunCfg:
     steps: int = 0
+    t_end: float | None = None
+    dt: float | None = None  # fixed time step; None -> CFL-based
+    log_every: int = 100
     output_every: int = 0
     stats_start: int = 0
     restart_every: int = 0
@@ -245,19 +254,19 @@ def _validate(cfg: CaseConfig) -> None:
 
     choice(cfg.grid.format, ("plot3d",), "grid.format")
     choice(cfg.numerics.precision, ("float32", "float64"), "numerics.precision")
-    choice(cfg.numerics.flux, ("keep_pe", "keep"), "numerics.flux")
-    choice(cfg.numerics.sensor, ("ducros", "none"), "numerics.sensor")
+    choice(cfg.numerics.flux, ("keep_pe",), "numerics.flux")
+    choice(cfg.numerics.sensor, ("ducros_pressure", "ducros", "none"), "numerics.sensor")
     choice(cfg.numerics.dissipation, ("roe", "rusanov", "none"), "numerics.dissipation")
     choice(cfg.numerics.rk, ("ssprk3",), "numerics.rk")
     choice(cfg.sgs.model, ("vreman", "wale", "smagorinsky", "none"), "sgs.model")
     choice(cfg.wall_model.type, ("equilibrium_ode", "algebraic", "none"), "wall_model.type")
     choice(cfg.gas.viscosity, ("sutherland", "power", "constant"), "gas.viscosity")
-    choice(cfg.forcing.type, ("none", "constant_mass_flux"), "forcing.type")
+    choice(cfg.forcing.type, ("none", "body_force", "constant_mass_flux"), "forcing.type")
     if cfg.flow.mach <= 0 or cfg.flow.reynolds <= 0 or cfg.flow.temperature <= 0:
         raise ConfigError("flow.mach, flow.reynolds and flow.temperature must be positive")
     if cfg.numerics.ghost_layers < 2:
         raise ConfigError("numerics.ghost_layers must be >= 2")
-    bc_types = ("wall", "wall_modeled", "slip", "farfield", "inflow", "outflow")
+    bc_types = ("wall", "wall_modeled", "slip", "farfield", "inflow", "outflow", "extrapolate", "dirichlet")
     for i, b in enumerate(cfg.boundaries):
         choice(b.type, bc_types, f"boundaries[{i}].type")
         for f in b.faces:

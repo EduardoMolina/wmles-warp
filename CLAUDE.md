@@ -20,6 +20,8 @@ conda run -n pyvista env PYTHONPATH=src python verification/mms_order.py   # als
 conda run -n pyvista env PYTHONPATH=src python verification/tgv.py --re 1600 --n 64 --t-end 20 --sgs vreman --dissipation roe
 conda run -n pyvista env PYTHONPATH=src python verification/channel_profiles.py out/stats.npz --reynolds 2800 --mach 0.2 --plot
 python verification/benchmark.py --n 256 --devices 1,2,4,8 --precision float32   # on the GPU node
+bash verification/channel_sweep.sh   # GPU node: Re_tau=5200 WMLES sweep, one case per GPU, in runs/ (DRY=1 to only generate)
+python verification/tgv.py --n 128 --re 1600 --t-end 20 --sgs vreman --dissipation roe --devices cuda:0 --precision float32
 conda run -n pyvista env PYTHONPATH=src python verification/channel_profiles.py out/stats.npz --reynolds 125000 --mach 0.2 \
     --utau forcing --lm cases/channel/LM_Channel_5200_mean_prof.dat --plot   # WMLES channel vs DNS
 ```

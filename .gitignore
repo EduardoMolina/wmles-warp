@@ -8,3 +8,4 @@ out/
 cases/**/a.out
 verification/results/logs/
 cases/channel_retau180/*.p3d
+runs/

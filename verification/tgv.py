@@ -75,10 +75,10 @@ DNS_PEAK_T = 9.0
 
 
 def run_tgv_dissipation(n=32, reynolds=1600.0, sgs="vreman", t_end=20.0, sample_dt=0.1, mach=0.1,
-                        dissipation="roe", partitions=1, precision="float64", log=False):
+                        dissipation="roe", partitions=1, precision="float64", log=False, devices=("cpu",)):
     """Returns times, k(t), eps(t) = -dk/dt (central differences at sample midpoints)."""
     s = make_tgv(n, mach=mach, reynolds=reynolds, dissipation=dissipation, partitions=partitions,
-                 precision=precision, sgs=sgs)
+                 precision=precision, sgs=sgs, devices=devices)
     times, ks = [0.0], [kinetic_energy(s)]
     for t in np.arange(sample_dt, t_end + 0.5 * sample_dt, sample_dt):
         s.advance(t_end=float(t))
@@ -100,12 +100,20 @@ def main():
     ap.add_argument("--re", type=float, default=None, help="viscous TGV (e.g. 1600); default inviscid")
     ap.add_argument("--sgs", default="none")
     ap.add_argument("--samples", type=int, default=10)
+    ap.add_argument("--precision", default="float64", choices=("float32", "float64"))
+    ap.add_argument("--devices", default="cpu", help="'cpu', 'auto' (all CUDA devices) or a comma list, e.g. cuda:0,cuda:1")
     args = ap.parse_args()
     init_warp()
+    from wmles_wrap.parallel.devices import resolve_devices
+    devices = resolve_devices("auto" if args.devices == "auto" else args.devices.split(","))
+    partitions = len(devices)
     if args.re is not None:
         times, ks, tm, eps = run_tgv_dissipation(args.n, args.re, args.sgs, args.t_end,
-                                                 dissipation=args.dissipation, log=True)
-        out = Path(__file__).parent / "results" / f"tgv_re{int(args.re)}_n{args.n}_{args.sgs}_{args.dissipation}.csv"
+                                                 dissipation=args.dissipation, log=True, devices=devices,
+                                                 partitions=partitions, precision=args.precision)
+        out = Path(__file__).parent / "results" / f"tgv_re{int(args.re)}_n{args.n}_{args.sgs}_{args.dissipation}"
+        tag = ("_fp32" if args.precision == "float32" else "") + ("" if devices == ["cpu"] else f"_{len(devices)}gpu")
+        out = out.with_name(out.name + tag + ".csv")  # CPU float64 keeps the committed reference names
         out.parent.mkdir(exist_ok=True)
         np.savetxt(out, np.column_stack([tm, eps, 0.5 * (ks[1:] + ks[:-1])]), delimiter=",",
                    header="t,eps,k", comments="")
@@ -113,7 +121,8 @@ def main():
         print(f"TGV Re={args.re:g} n={args.n} sgs={args.sgs} diss={args.dissipation}: peak eps {eps[i]:.5f} at t={tm[i]:.2f}"
               f"  (DNS {DNS_PEAK_EPS} at t~{DNS_PEAK_T}); wrote {out}")
         return
-    s = make_tgv(args.n, dissipation=args.dissipation)
+    s = make_tgv(args.n, dissipation=args.dissipation, precision=args.precision, devices=devices,
+                 partitions=partitions)
     k0 = kinetic_energy(s)
     print(f"{'t':>8} {'k/k0':>14} {'(k-k0)/k0':>12}")
     for t in np.linspace(0, args.t_end, args.samples + 1)[1:]:

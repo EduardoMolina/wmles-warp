@@ -17,7 +17,7 @@ transonic buffet on the NASA Common Research Model (CRM).
 | 0 | Infrastructure | done | `main` `cb1c8ad` |
 | 1 | Code verification | done; a few items deferred (see Phase 1) | `c215c1c` |
 | 2 | SGS and compressible turbulence | done on CPU; converged runs need the GPU node | `c1e232e` |
-| 3 | Wall-model validation | in progress: models and channel at Re_τ = 5200 done | `phase3-wallmodel` `3077414` |
+| 3 | Wall-model validation | in progress: models and channel at Re_τ = 5200 done | `main` `3077414` |
 | 4 | CGNS, OAT15A buffet, CRM | not started | — |
 
 ## Environment and design drivers

@@ -35,6 +35,9 @@ from .kernels import (
     VISC_CONSTANT,
     VISC_POWER,
     VISC_SUTHERLAND,
+    WM_ALGEBRAIC,
+    WM_EQUILIBRIUM,
+    WM_NONE,
     STAT_FIELDS,
     make_kernels,
     vec16d,
@@ -46,9 +49,11 @@ SSPRK3 = ((0.0, 1.0, 0.0), (0.75, 0.25, 1.0), (1.0 / 3.0, 2.0 / 3.0, 0.5))
 NO_DISSIPATION_BCS = ("wall", "wall_modeled", "slip")
 
 
-def bc_code(bc) -> int:
+def bc_code(bc, wall_model: str = "none") -> int:
+    if bc.type == "wall_modeled" and wall_model != "none":
+        # impermeable (slip-mirror) ghosts; the viscous wall flux comes from the wall model
+        return BC_SLIP
     if bc.type in ("wall", "wall_modeled"):
-        # TODO(phase 3): wall_modeled applies the wall-model shear stress / heat flux
         return BC_WALL_ISOTHERMAL if bc.thermal == "isothermal" else BC_WALL_ADIABATIC
     return {
         "slip": BC_SLIP,
@@ -69,6 +74,18 @@ class _BCLaunch:
     u_wall: tuple
     p_exit: float
     dims: tuple
+
+
+@dataclass
+class _WMFace:
+    axis: int
+    side: int
+    iso: int
+    t_wall: float
+    tw: wp.array  # (n_t1, n_t2) vec3 wall traction tau_w * t (on interior tangential cells)
+    q: wp.array  # (n_t1, n_t2) heat flux k dT/dn (n into the fluid)
+    ut: wp.array  # (n_t1, n_t2) friction velocity (diagnostic)
+    warm: bool = False  # tw holds a previous solution -> warm start
 
 
 @dataclass
@@ -93,6 +110,7 @@ class _SubData:
     bcs: list = field(default_factory=list)
     nodiss: list = field(default_factory=list)  # per axis (lo, hi)
     dirichlet: list = field(default_factory=list)
+    wm: dict = field(default_factory=dict)  # (axis, side) -> _WMFace
 
 
 class Integrator:
@@ -108,6 +126,7 @@ class Integrator:
         self.force = np.zeros(3)
         if cfg.forcing.type == "body_force":
             self.force = np.asarray(cfg.forcing.value, dtype=np.float64)
+        self._dummy_wm = {}
         self.data: dict[int, _SubData] = {sb.id: self._alloc(sb) for sb in solver.subs}
         self.dtmin = {d: wp.zeros(1, dtype=self.prec.scalar, device=d) for d in solver.devices}
         # constant mass flux control
@@ -149,6 +168,14 @@ class Integrator:
         P.sgs_model = {"none": SGS_NONE, "vreman": SGS_VREMAN, "wale": SGS_WALE,
                        "smagorinsky": SGS_SMAGORINSKY}[cfg.sgs.model] if cfg.numerics.viscous else SGS_NONE
         P.sgs_c = sc(cfg.sgs.coefficient)
+        wm = cfg.wall_model
+        P.wm_model = {"none": WM_NONE, "equilibrium_ode": WM_EQUILIBRIUM, "algebraic": WM_ALGEBRAIC}[wm.type]
+        P.wm_kappa = sc(wm.kappa)
+        P.wm_aplus = sc(wm.a_plus)
+        P.wm_n = wm.n_points
+        P.wm_r = sc(wm.stretching)
+        P.wm_iters = wm.iterations
+        P.wm_iters_warm = wm.iterations_warm
         return P
 
     def _alloc(self, sb: SubBlock) -> _SubData:
@@ -178,7 +205,12 @@ class Integrator:
         d.nodiss = [[0, 0], [0, 0], [0, 0]]
         for f, bc in sb.face_bc.items():
             ax, side = face_axis(f), face_side(f)
-            code = bc_code(bc)
+            code = bc_code(bc, self.s.cfg.wall_model.type)
+            if bc.type == "wall_modeled" and self.s.cfg.wall_model.type != "none":
+                tdims = tuple(nc[a] for a in range(3) if a != ax)
+                d.wm[(ax, side)] = _WMFace(
+                    ax, side, 1 if bc.thermal == "isothermal" else 0, float(bc.T_wall or 1.0),
+                    z(tdims, prec.vec3), z(tdims, prec.scalar), z(tdims, prec.scalar))
             tdims = tuple(pad[a] for a in range(3) if a != ax)
             u_wall = tuple(float(x) for x in bc.params.get("u_wall", (0.0, 0.0, 0.0)))
             p_exit = float(bc.params.get("p_exit", self.s.gas.R))  # default: free-stream p (rho=T=1)
@@ -231,8 +263,9 @@ class Integrator:
                 wp.launch(scatter, dim=len(dr.xc), inputs=[vals, dr.idx], outputs=[d.W], device=d.sub.device)
         self.s.halo.exchange(W, stages=(1, 2))
 
-    def rhs(self, t: float) -> None:
+    def rhs(self, t: float, stage: int = 0) -> None:
         K, ng = self.K, self.ng
+        update_wm = stage == 0 or self.s.cfg.wall_model.update == "stage"
         self.update_primitives()
         self.fill_ghosts(t)
         force = self.prec.vec3(*self.force)
@@ -245,14 +278,19 @@ class Integrator:
             if self.params.sgs_model != SGS_NONE:
                 wp.launch(K["sgs"], dim=tuple(n - 2 for n in pad), inputs=[d.W, d.GU, m.vol, self.params],
                           outputs=[d.mut], device=dev)
+            if update_wm:
+                self._wall_models(d, m)
             S = (m.Si, m.Sj, m.Sk)
             for ax in range(3):
                 Fa = d.F[ax]
+                lo = d.wm.get((ax, 0)) or self._dummy(dev)
+                hi = d.wm.get((ax, 1)) or self._dummy(dev)
                 wp.launch(
                     K["flux"],
                     dim=Fa.shape,
                     inputs=[d.W, d.GU, d.GT, d.th, d.mut, S[ax], m.xc, ax, ng, Fa.shape[ax],
-                            d.nodiss[ax][0], d.nodiss[ax][1], self.params],
+                            d.nodiss[ax][0], d.nodiss[ax][1], int((ax, 0) in d.wm), int((ax, 1) in d.wm),
+                            lo.tw, lo.q, hi.tw, hi.q, self.params],
                     outputs=[Fa],
                     device=dev,
                 )
@@ -264,6 +302,33 @@ class Integrator:
             wp.launch(K["residual"], dim=d.sub.nc,
                       inputs=[d.F[0], d.F[1], d.F[2], d.W, m.vol, d.src, has_src, force, ng], outputs=[d.R],
                       device=dev)
+
+    def _dummy(self, dev):
+        if dev not in self._dummy_wm:
+            z = lambda dt: wp.zeros((1, 1), dtype=dt, device=dev)  # noqa: E731
+            self._dummy_wm[dev] = _WMFace(0, 0, 0, 1.0, z(self.prec.vec3), z(self.prec.scalar), z(self.prec.scalar))
+        return self._dummy_wm[dev]
+
+    def _wall_models(self, d: _SubData, m) -> None:
+        """Evaluate the wall model on every wall-modeled face; warm-started from the stored
+        tau_w after the first call."""
+        if not d.wm:
+            return
+        ex = self.s.cfg.wall_model.exchange
+        cell_index = int(ex.cell_index or 1)
+        h_dist = float(ex.distance) if ex.distance else 0.0
+        for (ax, side), f in d.wm.items():
+            wp.launch(
+                self.K["wall_model"], dim=f.tw.shape,
+                inputs=[d.W, m.xc, ax, side, self.ng, d.sub.nc[ax], cell_index, self.prec.scalar(h_dist), f.iso,
+                        self.prec.scalar(f.t_wall), int(f.warm), self.params],
+                outputs=[f.tw, f.q, f.ut], device=d.sub.device)
+            f.warm = True
+
+    def wall_friction_velocity(self) -> float:
+        """Area-unweighted mean friction velocity over all wall-modeled faces (diagnostic)."""
+        vals = [f.ut.numpy().ravel() for d in self.data.values() for f in d.wm.values()]
+        return float(np.concatenate(vals).mean()) if vals else float("nan")
 
     # ---- time stepping --------------------------------------------------------------------
     def compute_dt(self, cfl: float) -> float:
@@ -282,8 +347,8 @@ class Integrator:
         K, ng, U = self.K, self.ng, self.s.U
         for sid, d in self.data.items():
             wp.copy(d.U0, U[sid])
-        for ca, cb, c in SSPRK3:
-            self.rhs(t + c * dt)
+        for stage, (ca, cb, c) in enumerate(SSPRK3):
+            self.rhs(t + c * dt, stage)
             for sid, d in self.data.items():
                 wp.launch(K["rk"], dim=d.sub.nc,
                           inputs=[U[sid], d.U0, d.R, self.s.metrics[sid].vol, self.prec.scalar(ca),

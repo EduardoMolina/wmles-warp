@@ -1,5 +1,6 @@
 # WMLES channel flow at Re_tau = 5200 (Lee & Moser 2015), UMD WMLES workshop grids.
-# Nondimensionalization: half-height h, bulk velocity, wall... see src/wmles_wrap/config.py
+# Nondimensionalization: half-height h, bulk velocity U_b, wall temperature (see src/wmles_wrap/config.py).
+# Reference: Lee & Moser (2015), Re_tau = 5186, U_b+ = 24.10 -> u_tau / U_b = 0.04149 (LM_Channel_5200_*.dat).
 grid:
   file: channel_ar1_1dwm_129x33.p3d
   format: plot3d
@@ -20,7 +21,7 @@ sgs: {model: vreman}   # c: model constant (defaults: vreman 0.07, wale 0.5, sma
 wall_model:
   type: equilibrium_ode       # or: algebraic
   exchange: {cell_index: 3}
-  n_points: 30
+  n_points: 40
 
 boundaries:
   - {faces: [jmin, jmax], type: wall_modeled, thermal: isothermal, T_wall: 1.0}
@@ -29,9 +30,12 @@ periodic:
   - {faces: [imin, imax], translation: [12.8, 0.0, 0.0]}
   - {faces: [kmin, kmax], translation: [0.0, 0.0, 4.8]}
 
-forcing: {type: constant_mass_flux}
+forcing: {type: constant_mass_flux, direction: [1.0, 0.0, 0.0], target: 1.0}
 
-run: {steps: 0, output_every: 5000, stats_start: 50000, restart_every: 10000}
+init: {type: channel, center: 0.0, half_height: 1.0, amplitude: 0.1}
+
+# ~5300 steps per flow-through (12.8 h / U_b) on these grids at M_b = 0.2
+run: {steps: 200000, output_every: 20000, stats_start: 50000, stats_every: 5, restart_every: 20000, log_every: 1000}
 
 parallel: {devices: auto, partitions: auto}   # on a CPU-only machine set e.g. partitions: 8 to test decomposition
 

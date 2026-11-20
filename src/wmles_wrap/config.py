@@ -97,8 +97,11 @@ class ExchangeCfg:
 class WallModelCfg:
     type: str = "equilibrium_ode"  # equilibrium_ode | algebraic | none
     exchange: ExchangeCfg = field(default_factory=ExchangeCfg)
-    n_points: int = 30
-    stretching: float = 1.1
+    n_points: int = 40  # wall-model grid points (<= 64)
+    stretching: float = 1.15  # geometric stretching of the wall-model grid
+    iterations: int = 30  # fixed-point iterations, cold start (equilibrium model)
+    iterations_warm: int = 4  # fixed-point iterations when warm-started from the previous tau_w
+    update: str = "step"  # step: evaluate once per time step (first RK stage) | stage: every RK stage
     kappa: float = 0.41
     a_plus: float = 17.0
 
@@ -284,6 +287,12 @@ def _validate(cfg: CaseConfig) -> None:
     choice(cfg.gas.viscosity, ("sutherland", "power", "constant"), "gas.viscosity")
     choice(cfg.forcing.type, ("none", "body_force", "constant_mass_flux"), "forcing.type")
     choice(cfg.init.type, ("freestream", "channel"), "init.type")
+    choice(cfg.wall_model.update, ("step", "stage"), "wall_model.update")
+    if not 3 <= cfg.wall_model.n_points <= 64:
+        raise ConfigError("wall_model.n_points must be in [3, 64]")
+    ex = cfg.wall_model.exchange
+    if (ex.distance is None or ex.distance <= 0) and (ex.cell_index is None or ex.cell_index < 1):
+        raise ConfigError("wall_model.exchange needs cell_index >= 1 or distance > 0")
     if cfg.flow.mach <= 0 or cfg.flow.reynolds <= 0 or cfg.flow.temperature <= 0:
         raise ConfigError("flow.mach, flow.reynolds and flow.temperature must be positive")
     if cfg.numerics.ghost_layers < 2:

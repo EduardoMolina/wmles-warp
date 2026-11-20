@@ -37,6 +37,8 @@ BC_DIRICHLET = 7  # filled on the host (verification)
 
 DISS_NONE, DISS_RUSANOV, DISS_ROE = 0, 1, 2
 SGS_NONE, SGS_VREMAN, SGS_WALE, SGS_SMAGORINSKY = 0, 1, 2, 3
+WM_NONE, WM_EQUILIBRIUM, WM_ALGEBRAIC = 0, 1, 2
+WM_MAX_POINTS = 64
 
 # statistics sample vector (float64): means and second moments of primitive variables
 STAT_FIELDS = ("rho", "u", "v", "w", "p", "T", "uu", "vv", "ww", "uv", "uw", "vw", "pp", "TT", "rhou", "mut")
@@ -57,6 +59,12 @@ def make_kernels(prec: Precision):
     two_thirds = scalar(2.0 / 3.0)
     four_thirds = scalar(4.0 / 3.0)
     tenth = scalar(0.1)
+    third = scalar(1.0 / 3.0)
+    c_r04 = scalar(0.4)  # Reichardt constants
+    c_r78 = scalar(7.8)
+    c_r11 = scalar(1.0 / 11.0)
+    c_r33 = scalar(1.0 / 33.0)
+    vecN = wp.types.vector(WM_MAX_POINTS, scalar)
     # NOTE: fractional constants must be defined here (closure, exact in the kernel precision).
     # Inside a kernel, Python float literals are float32: scalar(2.0 / 3.0) there computes
     # 2/3 in float32 and then converts, silently losing precision in float64 kernels.
@@ -84,6 +92,13 @@ def make_kernels(prec: Precision):
         viscous: int
         sgs_model: int  # 0 none, 1 Vreman, 2 WALE, 3 Smagorinsky
         sgs_c: scalar
+        wm_model: int  # 1 equilibrium ODE, 2 algebraic (Reichardt + Crocco-Busemann)
+        wm_kappa: scalar
+        wm_aplus: scalar
+        wm_n: int
+        wm_r: scalar
+        wm_iters: int
+        wm_iters_warm: int
 
     # ---- thermodynamics -----------------------------------------------------------------
     @wp.func
@@ -433,6 +448,12 @@ def make_kernels(prec: Precision):
         nfaces: int,
         nodiss_lo: int,
         nodiss_hi: int,
+        wm_lo: int,
+        wm_hi: int,
+        tw_lo: wp.array2d(dtype=vec3),
+        q_lo: wp.array2d(dtype=scalar),
+        tw_hi: wp.array2d(dtype=vec3),
+        q_hi: wp.array2d(dtype=scalar),
         p: Params,
         F: wp.array3d(dtype=vec5),
     ):
@@ -495,8 +516,216 @@ def make_kernels(prec: Precision):
             div = gu[0, 0] + gu[1, 1] + gu[2, 2]
             tau = mue * (gu + wp.transpose(gu)) - (two_thirds * mue * div) * wp.identity(n=3, dtype=scalar)
             ts = tau * Sf
-            flux = flux - vec5(zero, ts[0], ts[1], ts[2], wp.dot(ts, uf) + kappa * wp.dot(gt, Sf))
+            fv = vec5(zero, ts[0], ts[1], ts[2], wp.dot(ts, uf) + kappa * wp.dot(gt, Sf))
+            # wall-modeled faces: modeled traction tau_w * t and heat flux Q = k dT/dn (n into the
+            # fluid) replace the resolved viscous flux; the sign accounts for S pointing into the
+            # fluid on the low side and out of it on the high side
+            t1 = b
+            t2 = c
+            if axis == 1:
+                t1 = a
+            elif axis == 2:
+                t1 = a
+                t2 = b
+            area = wp.length(Sf)
+            if fa == 0 and wm_lo == 1:
+                tw = tw_lo[t1, t2] * area
+                fv = vec5(zero, tw[0], tw[1], tw[2], q_lo[t1, t2] * area)
+            if fa == nfaces - 1 and wm_hi == 1:
+                tw = tw_hi[t1, t2] * area
+                fv = -vec5(zero, tw[0], tw[1], tw[2], q_hi[t1, t2] * area)
+            flux = flux - fv
         F[a, b, c] = flux
+
+    # ---- wall models ------------------------------------------------------------------------
+    @wp.func
+    def reichardt(yp: scalar) -> scalar:
+        return wp.log(one + c_r04 * yp) / c_r04 + c_r78 * (one - wp.exp(-yp * c_r11) - yp * c_r11 * wp.exp(-yp * third))
+
+    @wp.func
+    def reichardt_deriv(yp: scalar) -> scalar:
+        return one / (one + c_r04 * yp) + c_r78 * (wp.exp(-yp * c_r11) * c_r11 - wp.exp(-yp * third) * c_r11
+                                                    + yp * c_r33 * wp.exp(-yp * third))
+
+    @wp.func
+    def algebraic_utau(U: scalar, h: scalar, nu: scalar) -> scalar:
+        ut = wp.max(wp.sqrt(nu * U / h), tiny)
+        for it in range(30):
+            yp = h * ut / nu
+            g = ut * reichardt(yp) - U
+            dg = reichardt(yp) + yp * reichardt_deriv(yp)
+            ut = wp.max(ut - g / dg, tenth * ut)
+        return ut
+
+    @wp.func
+    def wm_algebraic(U: scalar, h: scalar, T_e: scalar, pe: scalar, iso: int, T_w: scalar, p: Params) -> wp.vec2d:
+        Tw = T_e
+        if iso == 1:
+            Tw = T_w
+        rho_w = pe / (p.R * Tw)
+        mu_w = viscosity(Tw, p)
+        ut = algebraic_utau(U, h, mu_w / rho_w)
+        tau = rho_w * ut * ut
+        Q = scalar(0.0)
+        if iso == 1 and U > zero:
+            T_aw = T_e + wp.pow(p.prandtl, third) * U * U / (two * p.cp)
+            Q = p.cp / p.prandtl * (T_aw - T_w) * tau / U
+        return wp.vec2d(wp.float64(tau), wp.float64(Q))
+
+    @wp.func
+    def wm_equilibrium(U: scalar, h: scalar, T_e: scalar, pe: scalar, iso: int, T_w: scalar, tau0: scalar,
+                       p: Params) -> wp.vec2d:
+        n = p.wm_n
+        r = p.wm_r
+        dy0 = h / scalar(n - 1)
+        if wp.abs(r - one) > scalar(1e-6):
+            dy0 = h * (r - one) / (wp.pow(r, scalar(n - 1)) - one)
+        tau = tau0
+        iters = p.wm_iters_warm
+        if tau0 <= zero:  # cold start from the algebraic model
+            res = wm_algebraic(U, h, T_e, pe, iso, T_w, p)
+            tau = scalar(res[0])
+            iters = p.wm_iters
+        T = vecN()
+        Ig = vecN()
+        Igu = vecN()
+        # grid: y_0 = 0, y_i = y_{i-1} + seg_i, seg_i = dy0 r^(i-1), y_{n-1} = h
+        y = scalar(0.0)
+        seg = dy0
+        for i in range(n):
+            if i > 0:
+                y = y + seg
+                seg = seg * r
+            T[i] = T_e
+            if iso == 1:
+                T[i] = T_w + (T_e - T_w) * y / h
+        Q = scalar(0.0)
+        for it in range(iters):
+            # pass 1: momentum quadrature int dy / (mu + mu_t) -> tau_new
+            y = scalar(0.0)
+            seg = dy0
+            cum = scalar(0.0)
+            f_prev = scalar(0.0)
+            for i in range(n):
+                ds = scalar(0.0)
+                if i > 0:
+                    ds = seg
+                    y = y + seg
+                    seg = seg * r
+                rho = pe / (p.R * T[i])
+                mu = viscosity(T[i], p)
+                dmp = one - wp.exp(-(y * wp.sqrt(rho * tau) / mu) / p.wm_aplus)
+                f = one / (mu + p.wm_kappa * rho * y * wp.sqrt(tau / rho) * dmp * dmp)
+                cum = cum + half * (f + f_prev) * ds
+                f_prev = f
+            tau_new = U / cum
+            # pass 2: velocity profile and energy quadratures
+            y = scalar(0.0)
+            seg = dy0
+            cu = scalar(0.0)
+            f_prev = scalar(0.0)
+            g_prev = scalar(0.0)
+            gu_prev = scalar(0.0)
+            for i in range(n):
+                ds = scalar(0.0)
+                if i > 0:
+                    ds = seg
+                    y = y + seg
+                    seg = seg * r
+                rho = pe / (p.R * T[i])
+                mu = viscosity(T[i], p)
+                dmp = one - wp.exp(-(y * wp.sqrt(rho * tau) / mu) / p.wm_aplus)
+                mt = p.wm_kappa * rho * y * wp.sqrt(tau / rho) * dmp * dmp
+                f = one / (mu + mt)
+                cu = cu + half * (f + f_prev) * ds
+                u = U * cu / cum
+                g = one / (p.cp * (mu / p.prandtl + mt / p.prandtl_t))
+                gu = tau_new * u * g
+                if i == 0:
+                    Ig[i] = zero
+                    Igu[i] = zero
+                else:
+                    Ig[i] = Ig[i - 1] + half * (g + g_prev) * ds
+                    Igu[i] = Igu[i - 1] + half * (gu + gu_prev) * ds
+                f_prev = f
+                g_prev = g
+                gu_prev = gu
+            if iso == 1:
+                Q = (T_e - T_w + Igu[n - 1]) / Ig[n - 1]
+                for i in range(n):
+                    T[i] = T_w + Q * Ig[i] - Igu[i]
+            else:
+                Q = scalar(0.0)
+                for i in range(n):
+                    T[i] = T_e + (Igu[n - 1] - Igu[i])
+            tau = tau_new  # undamped fixed point: contraction ~0.5 per iteration
+        return wp.vec2d(wp.float64(tau), wp.float64(Q))
+
+    @wp.kernel(module="unique")
+    def k_wall_model(
+        W: wp.array3d(dtype=vec5),
+        xc: wp.array3d(dtype=vec3),
+        axis: int,
+        side: int,
+        ng: int,
+        nc: int,
+        cell_index: int,
+        h_dist: scalar,
+        iso: int,
+        T_w: scalar,
+        warm: int,
+        p: Params,
+        tw_out: wp.array2d(dtype=vec3),
+        q_out: wp.array2d(dtype=scalar),
+        ut_out: wp.array2d(dtype=scalar),
+    ):
+        t1, t2 = wp.tid()
+        first = ng
+        ghost = ng - 1
+        step = 1
+        if side == 1:
+            first = ng + nc - 1
+            ghost = ng + nc
+            step = -1
+        cf = cell(axis, first, t1 + ng, t2 + ng)
+        cg = cell(axis, ghost, t1 + ng, t2 + ng)
+        xfirst = xc[cf[0], cf[1], cf[2]]
+        xghost = xc[cg[0], cg[1], cg[2]]
+        xf = half * (xfirst + xghost)
+        nrm = wp.normalize(xfirst - xghost)  # into the fluid
+        m = int(cell_index - 1)
+        if h_dist > zero:
+            m = int(0)
+            for q in range(nc):
+                cq = cell(axis, first + step * q, t1 + ng, t2 + ng)
+                if wp.dot(xc[cq[0], cq[1], cq[2]] - xf, nrm) < h_dist:
+                    m = q + 1
+            m = wp.min(m, nc - 1)
+        ce = cell(axis, first + step * m, t1 + ng, t2 + ng)
+        We = W[ce[0], ce[1], ce[2]]
+        h = wp.dot(xc[ce[0], ce[1], ce[2]] - xf, nrm)
+        u = velocity(We)
+        ut = u - wp.dot(u, nrm) * nrm
+        U = wp.length(ut)
+        tdir = vec3()
+        if U > tiny:
+            tdir = ut / U
+        T_e = temperature(We, p)
+        res = wp.vec2d()
+        tau_prev = zero
+        if warm == 1:
+            tau_prev = wp.length(tw_out[t1, t2])
+        if p.wm_model == 1:
+            res = wm_equilibrium(U, h, T_e, We[4], iso, T_w, tau_prev, p)
+        else:
+            res = wm_algebraic(U, h, T_e, We[4], iso, T_w, p)
+        tau = scalar(res[0])
+        tw_out[t1, t2] = tau * tdir
+        q_out[t1, t2] = scalar(res[1])
+        Tw = T_e
+        if iso == 1:
+            Tw = T_w
+        ut_out[t1, t2] = wp.sqrt(tau * p.R * Tw / We[4])
 
     @wp.kernel(module="unique")
     def k_residual(
@@ -623,4 +852,5 @@ def make_kernels(prec: Precision):
         "momentum": k_momentum,
         "add_momentum": k_add_momentum,
         "stats": k_stats,
+        "wall_model": k_wall_model,
     }

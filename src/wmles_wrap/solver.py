@@ -218,6 +218,8 @@ class Solver:
                 extra = ""
                 if self.integrator.forcing_history:
                     extra = f"  forcing {self.integrator.forcing_history[-1][1]:.4e}"
+                if any(d.wm for d in self.integrator.data.values()):
+                    extra += f"  u_tau(wm) {self.integrator.wall_friction_velocity():.5f}"
                 log.info("step %8d  t %.6e  dt %.3e  res(rho,rhoE) %.3e %.3e  %.3g Mcell-steps/s%s",
                          self.step, self.time, dt, res[0], res[4], ncell * n / el / 1e6, extra)
                 if not np.all(np.isfinite(res)):

@@ -42,3 +42,13 @@ TGV Re = 1600 peak dissipation rate ε = −dk/dt (DNS: 0.0127 at t ≈ 9.0, van
 At t = 0 the no-SGS run reproduces the laminar dissipation ν⟨|ω|²⟩ = 0.75/1600 = 4.7e-4. Vreman and WALE add about 7e-4 in the laminar/transitional phase (neither vanishes for the 3D initial TGV field), which moves the peak earlier on coarse grids. This SGS contribution at t = 0 drops from 7.4e-4 (32³) to 1.9e-4 (64³), the expected Δ² scaling.
 
 At 64³ the curves move toward the DNS, but none has converged: all peak about 15% low and about 1 time unit early. A second-order scheme needs about 128³ for this case (GPU run). In this low-Re transitional flow the no-SGS run (KEEP-PE with the sensor essentially inactive) is closest to the DNS at 64³, because Vreman and WALE over-dissipate during transition (shoulder near t ≈ 6). This is a property of the case, not of wall-bounded high-Re WMLES, where the SGS model is still needed.
+
+## Phase 3: wall models
+
+| Study | Script / test | Result |
+|---|---|---|
+| Warp wall-model kernel vs numpy reference (equilibrium ODE and algebraic; isothermal/adiabatic; both wall sides; exchange by cell index or distance) | `tests/test_wallmodel.py` | τ_w and q_w agree to 1e-10 |
+| A priori, Lee & Moser Re_τ = 5200: DNS mean velocity at y = h → model u_τ (DNS u_τ/U_b = 0.04149) | `tests/test_wallmodel.py` | equilibrium: +0.01% (h = 0.05), +0.4% (0.1), +0.8% (0.2), +1.6% (0.3); algebraic (Reichardt): −3.0%, −2.5%, −1.9%, −1.6% |
+| Fixed-point convergence (equilibrium model) | — | undamped: rel. error 2e-3 after 4 iterations, 1e-5 after 10 (cold start, 30 iterations by default; 4 with warm start) |
+| Momentum balance in the solver: mass-flux forcing = modeled wall traction / volume | `tests/test_wallmodel.py::test_wall_traction_balances_forcing` | equal to 1e-10 for both models |
+| WMLES channel Re_τ = 5200, UMD grids | `cases/channel/case.yaml`, `channel_profiles.py --utau forcing --lm ...` | ar2 grid 64×32×48 cells (extruded to 4.8h), M = 0.2, Re_b = 125 000, Vreman, exchange at cell 3 (h ≈ 0.156), isothermal walls, 60 000 steps (t ≈ 169 h/U_b), statistics over t ≈ 70–169: **equilibrium ODE u_τ/U_b = 0.0407 (−1.9%, Re_τ 5075)**; algebraic 0.0397 (−4.3%, Re_τ 4957). Both show the log-layer mismatch typical of coarse WMLES (u⁺ ≈ 3 low at the first cell, slope too steep) and an overpredicted u_rms⁺ near the wall; the outer region (y⁺ > 1000) matches DNS. Last three time-window averages of u_τ agree to ±0.5%. Plots: `results/channel_re5200_wm_compare_ar2.png` (+ per-model `.png`/`.txt`) |

@@ -1,0 +1,38 @@
+# WMLES channel flow at Re_tau = 5200 (Lee & Moser 2015), UMD WMLES workshop grids.
+# Nondimensionalization: half-height h, bulk velocity, wall... see src/wmles_wrap/config.py
+grid:
+  file: channel_ar1_1dwm_129x33.p3d
+  format: plot3d
+  extrude: {nk: 49, length: 4.8}
+
+flow:
+  mach: 0.2           # bulk Mach number
+  reynolds: 125000    # bulk Reynolds number, Re_b = U_b h / nu  (Re_tau ~ 5200)
+  temperature: 300.0  # reference temperature [K]
+  ref_length: 1.0     # h (grid already in units of h)
+
+gas: {gamma: 1.4, prandtl: 0.72, prandtl_t: 0.9, viscosity: sutherland}
+
+numerics: {precision: float64, flux: keep_pe, sensor: ducros, dissipation: roe, cfl: 0.8, rk: ssprk3}
+
+sgs: {model: vreman, c: 0.07}
+
+wall_model:
+  type: equilibrium_ode       # or: algebraic
+  exchange: {cell_index: 3}
+  n_points: 30
+
+boundaries:
+  - {faces: [jmin, jmax], type: wall_modeled, thermal: isothermal, T_wall: 1.0}
+
+periodic:
+  - {faces: [imin, imax], translation: [12.8, 0.0, 0.0]}
+  - {faces: [kmin, kmax], translation: [0.0, 0.0, 4.8]}
+
+forcing: {type: constant_mass_flux}
+
+run: {steps: 0, output_every: 5000, stats_start: 50000, restart_every: 10000}
+
+parallel: {devices: auto, partitions: auto}   # on a CPU-only machine set e.g. partitions: 8 to test decomposition
+
+output: {dir: out, fields: [rho, u, v, w, p, T, mach], format: vtm}

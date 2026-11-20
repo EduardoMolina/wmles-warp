@@ -97,6 +97,8 @@ class Solver:
         self.U = {s.id: self._alloc_state(s) for s in self.subs}
         self.init_freestream()
         self.integrator = Integrator(self)
+        if cfg.init.type == "channel":
+            self.init_channel()
         self.setup_time = _time.perf_counter() - t0
 
     # ---- state ------------------------------------------------------------------------------
@@ -124,6 +126,73 @@ class Solver:
             T = p / (rho * self.gas.R)
             self.set_state(s.id, self.gas.conservative(rho, W[..., 1], W[..., 2], W[..., 3], T))
 
+    def init_channel(self) -> None:
+        """Turbulent-like channel initial condition: 1/7 power-law mean profile with bulk velocity
+        1 along forcing.direction (wall-normal = y), random + streak perturbations vanishing at
+        the walls, uniform T = 1 and p = R (rho = 1)."""
+        ic = self.cfg.init
+        d = self.integrator.force_dir
+        R = self.gas.R
+        self._all_x = np.concatenate([b[..., 0].ravel() for b in self.parent_blocks])
+        self._all_z = np.concatenate([b[..., 2].ravel() for b in self.parent_blocks])
+
+        def noise(xc, comp):
+            """Deterministic pseudo-random field in [-1, 1] from the cell position, so the initial
+            condition does not depend on the partitioning."""
+            k = np.array([12.9898, 78.233, 37.719]) * (1.0 + 0.37 * comp) + 0.1 * ic.seed
+            v = np.sin(xc @ k * 1e3) * 43758.5453
+            return 2.0 * (v - np.floor(v)) - 1.0
+
+        def fn(xc):
+            eta = (xc[..., 1] - ic.center) / ic.half_height
+            damp = np.clip(1.0 - eta**2, 0.0, 1.0)
+            umean = 8.0 / 7.0 * np.clip(1.0 - np.abs(eta), 0.0, 1.0) ** (1.0 / 7.0)
+            x, z = xc[..., 0], xc[..., 2]
+            lx, lz = max(np.ptp(self._all_x), 1e-12), max(np.ptp(self._all_z), 1e-12)
+            A = ic.amplitude
+            W = np.zeros(xc.shape[:-1] + (5,))
+            W[..., 0] = 1.0
+            vel = umean[..., None] * d
+            pert = A * damp[..., None] * np.stack([noise(xc, c) for c in range(3)], axis=-1)
+            # large-scale streamwise vortices / streaks to accelerate transition
+            pert[..., 0] += 2 * A * damp * np.cos(4 * np.pi * z / lz) * np.sin(np.pi * eta)
+            pert[..., 1] += A * damp * np.sin(4 * np.pi * x / lx) * np.cos(4 * np.pi * z / lz)
+            W[..., 1:4] = vel + pert
+            W[..., 4] = R
+            return W
+
+        self.set_primitive_field(fn)
+        if self.integrator.mass_flux:
+            self.integrator.apply_mass_flux_control(1.0, 0.0)
+            self.integrator.forcing_history.clear()
+
+    def write_stats(self) -> Path | None:
+        """Write time-averaged fields (vtm) and per-parent-block arrays (npz)."""
+        I = self.integrator
+        if I.stats_count == 0:
+            return None
+        from .numerics.kernels import STAT_FIELDS
+
+        blocks = []
+        parent = [np.zeros(tuple(n - 1 for n in x.shape[:3]) + (len(STAT_FIELDS),)) for x in self.parent_blocks]
+        for s in self.subs:
+            m = I.stats_mean(s.id)
+            blocks.append((f"block{s.parent}_part{s.id}", s.x, m))
+            lo, hi = s.lo, s.hi
+            parent[s.parent][lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = np.stack([m[k] for k in STAT_FIELDS], -1)
+        writer = SnapshotWriter(self.out_dir, basename="stats")
+        path = writer.write(self.step, self.time, blocks)
+        np.savez(self.out_dir / "stats.npz", fields=np.array(STAT_FIELDS), count=I.stats_count, step=self.step,
+                 time=self.time, **{f"block{b:04d}": a for b, a in enumerate(parent)},
+                 **{f"xc{b:04d}": self._parent_centroids(b) for b in range(len(parent))},
+                 forcing=np.array(I.forcing_history))
+        return path
+
+    def _parent_centroids(self, b: int) -> np.ndarray:
+        x = self.parent_blocks[b]
+        return 0.125 * sum(x[i:x.shape[0] - 1 + i, j:x.shape[1] - 1 + j, k:x.shape[2] - 1 + k]
+                           for i in (0, 1) for j in (0, 1) for k in (0, 1))
+
     def advance(self, nsteps: int | None = None, t_end: float | None = None, log_every: int = 0) -> None:
         """Advance ``nsteps`` steps and/or until ``t_end`` (final step clipped to hit t_end)."""
         cfg = self.cfg
@@ -137,12 +206,20 @@ class Solver:
             self.time += dt
             self.step += 1
             n += 1
+            if self.integrator.mass_flux:
+                self.integrator.apply_mass_flux_control(dt, self.time)
+            if cfg.run.stats_start and self.step >= cfg.run.stats_start and \
+                    (self.step - cfg.run.stats_start) % max(cfg.run.stats_every, 1) == 0:
+                self.integrator.accumulate_stats()
             if log_every and self.step % log_every == 0:
                 res = self.integrator.residual_norms()
                 el = _time.perf_counter() - t_wall
                 ncell = sum(s.ncells for s in self.subs)
-                log.info("step %8d  t %.6e  dt %.3e  res(rho,rhoE) %.3e %.3e  %.3g Mcell-steps/s",
-                         self.step, self.time, dt, res[0], res[4], ncell * n / el / 1e6)
+                extra = ""
+                if self.integrator.forcing_history:
+                    extra = f"  forcing {self.integrator.forcing_history[-1][1]:.4e}"
+                log.info("step %8d  t %.6e  dt %.3e  res(rho,rhoE) %.3e %.3e  %.3g Mcell-steps/s%s",
+                         self.step, self.time, dt, res[0], res[4], ncell * n / el / 1e6, extra)
                 if not np.all(np.isfinite(res)):
                     raise FloatingPointError(f"non-finite residual at step {self.step}")
             if nsteps is None and t_end is None:
@@ -164,10 +241,12 @@ class Solver:
             self.advance(nsteps=n, t_end=cfg.t_end, log_every=cfg.log_every)
             if cfg.output_every and self.step % cfg.output_every == 0:
                 self.write_output(writer)
+                self.write_stats()
             if cfg.restart_every and self.step % cfg.restart_every == 0:
                 self.write_restart(self.out_dir / f"restart_{self.step:08d}.npz")
         if not cfg.output_every or self.step % cfg.output_every != 0:
             self.write_output(writer)
+        self.write_stats()
         self.write_restart(self.out_dir / "restart_final.npz")
 
     def interior(self, a: np.ndarray) -> np.ndarray:

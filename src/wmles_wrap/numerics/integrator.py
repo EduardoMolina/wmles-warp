@@ -28,10 +28,16 @@ from .kernels import (
     DISS_NONE,
     DISS_ROE,
     DISS_RUSANOV,
+    SGS_NONE,
+    SGS_SMAGORINSKY,
+    SGS_VREMAN,
+    SGS_WALE,
     VISC_CONSTANT,
     VISC_POWER,
     VISC_SUTHERLAND,
+    STAT_FIELDS,
     make_kernels,
+    vec16d,
 )
 
 # SSP-RK3 (Shu & Osher): U^{(s)} = a_s U^n + b_s (U^{(s-1)} + dt L(U^{(s-1)})), stage time c_s
@@ -104,6 +110,17 @@ class Integrator:
             self.force = np.asarray(cfg.forcing.value, dtype=np.float64)
         self.data: dict[int, _SubData] = {sb.id: self._alloc(sb) for sb in solver.subs}
         self.dtmin = {d: wp.zeros(1, dtype=self.prec.scalar, device=d) for d in solver.devices}
+        # constant mass flux control
+        self.mass_flux = cfg.forcing.type == "constant_mass_flux"
+        d = np.asarray(cfg.forcing.direction, dtype=np.float64)
+        self.force_dir = d / np.linalg.norm(d)
+        self.forcing_history: list[tuple[float, float]] = []  # (t, equivalent body force per volume)
+        self._vol_total = sum(float(self.s.interior(self.s.metrics[i].vol.numpy()).astype(np.float64).sum())
+                              for i in self.data)
+        self._msum = {d: wp.zeros(1, dtype=wp.float64, device=d) for d in solver.devices}
+        # statistics
+        self.stats_count = 0
+        self.stats: dict[int, wp.array] = {}
 
     # ---- setup ----------------------------------------------------------------------------
     def _make_params(self):
@@ -129,6 +146,9 @@ class Integrator:
         P.use_sensor = {"none": 0, "ducros": 1, "ducros_pressure": 2}[cfg.numerics.sensor]
         P.pressure_gain = sc(cfg.numerics.sensor_pressure_gain)
         P.viscous = 1 if cfg.numerics.viscous else 0
+        P.sgs_model = {"none": SGS_NONE, "vreman": SGS_VREMAN, "wale": SGS_WALE,
+                       "smagorinsky": SGS_SMAGORINSKY}[cfg.sgs.model] if cfg.numerics.viscous else SGS_NONE
+        P.sgs_c = sc(cfg.sgs.coefficient)
         return P
 
     def _alloc(self, sb: SubBlock) -> _SubData:
@@ -222,6 +242,9 @@ class Integrator:
             pad = d.sub.padded_shape_cells(ng)
             wp.launch(K["gradients"], dim=tuple(n - 2 for n in pad),
                       inputs=[d.W, m.Si, m.Sj, m.Sk, m.vol, self.params], outputs=[d.GU, d.GT, d.th], device=dev)
+            if self.params.sgs_model != SGS_NONE:
+                wp.launch(K["sgs"], dim=tuple(n - 2 for n in pad), inputs=[d.W, d.GU, m.vol, self.params],
+                          outputs=[d.mut], device=dev)
             S = (m.Si, m.Sj, m.Sk)
             for ax in range(3):
                 Fa = d.F[ax]
@@ -266,6 +289,50 @@ class Integrator:
                           inputs=[U[sid], d.U0, d.R, self.s.metrics[sid].vol, self.prec.scalar(ca),
                                   self.prec.scalar(cb), self.prec.scalar(dt), ng],
                           device=d.sub.device)
+
+    # ---- forcing ---------------------------------------------------------------------------
+    def bulk_momentum(self) -> float:
+        """Volume average of rho u . direction over all interior cells."""
+        K, ng = self.K, self.ng
+        total = 0.0
+        dvec = self.prec.vec3(*self.force_dir)
+        for sid, d in self.data.items():
+            dev = d.sub.device
+            tmp = wp.empty(d.sub.nc, dtype=wp.float64, device=dev)
+            wp.launch(K["momentum"], dim=d.sub.nc, inputs=[self.s.U[sid], dvec, self.s.metrics[sid].vol, ng],
+                      outputs=[tmp], device=dev)
+            wp.utils.array_sum(tmp.flatten(), out=self._msum[dev])
+            total += float(self._msum[dev].numpy()[0])
+        return total / self._vol_total
+
+    def apply_mass_flux_control(self, dt: float, t: float) -> None:
+        """Restore the bulk momentum to cfg.forcing.target after a step (uniform increment,
+        internal energy unchanged); dm/dt is the equivalent mean body force per unit volume."""
+        dm = self.s.cfg.forcing.target - self.bulk_momentum()
+        dvec = self.prec.vec3(*self.force_dir)
+        for sid, d in self.data.items():
+            wp.launch(self.K["add_momentum"], dim=d.sub.nc,
+                      inputs=[self.s.U[sid], dvec, self.prec.scalar(dm), self.ng], device=d.sub.device)
+        self.forcing_history.append((t, dm / dt))
+
+    # ---- statistics ------------------------------------------------------------------------
+    def accumulate_stats(self) -> None:
+        self.update_primitives()
+        for sid, d in self.data.items():
+            if sid not in self.stats:
+                self.stats[sid] = wp.zeros(d.sub.nc, dtype=vec16d, device=d.sub.device)
+            wp.launch(self.K["stats"], dim=d.sub.nc, inputs=[d.W, d.mut, self.ng, self.params],
+                      outputs=[self.stats[sid]], device=d.sub.device)
+        self.stats_count += 1
+
+    def stats_mean(self, sid: int) -> dict[str, np.ndarray]:
+        """Time averages per field for one sub-block (interior cells)."""
+        acc = self.stats[sid].numpy() / max(self.stats_count, 1)
+        return {k: acc[..., i] for i, k in enumerate(STAT_FIELDS)}
+
+    def reset_stats(self) -> None:
+        self.stats = {}
+        self.stats_count = 0
 
     def residual_norms(self) -> np.ndarray:
         """RMS of dU/dt (= R/V) over all interior cells, per conservative variable."""

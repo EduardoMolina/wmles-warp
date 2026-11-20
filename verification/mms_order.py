@@ -39,6 +39,7 @@ def run_mms(n: int, viscous: bool = True, dissipation: str = "none", partitions:
         extra={
             "flow": {"mach": 0.5, "reynolds": 50.0, "temperature": 300.0},
             "numerics": {"viscous": viscous, "dissipation": dissipation, "precision": precision},
+            "sgs": {"model": "none"},
             "boundaries": dir_bc,
             "periodic": [{"translation": [2.0, 0.0, 0.0]}],
             "run": {"dt": 0.05 / n},

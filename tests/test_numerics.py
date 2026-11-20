@@ -45,6 +45,7 @@ def _perturbed_case(tmp_path, partitions):
         tmp_path, partitions,
         extra={
             "numerics": {"dissipation": "roe"},
+            "sgs": {"model": "vreman"},
             "boundaries": [
                 {"faces": ["jmin", "jmax"], "type": "wall", "block": 0, "thermal": "isothermal", "T_wall": 1.05},
                 {"faces": ["imin", "imax"], "type": "wall", "block": 1, "thermal": "isothermal", "T_wall": 1.05},
@@ -137,3 +138,18 @@ def test_inviscid_tgv_conservation():
     assert abs(kinetic_energy(s) / k0 - 1) < 1e-3
     assert abs(c[0] / c0[0] - 1) < 1e-12 and abs(c[4] / c0[4] - 1) < 1e-12
     assert np.abs(c[1:4]).max() < 1e-12
+
+
+def test_compressible_isotropic_turbulence_robust():
+    """Mt = 0.6 decaying turbulence develops shocklets; the sensor must keep it stable and the
+    kinetic energy must decay monotonically."""
+    from isotropic import diagnostics, make_isotropic
+
+    s, tau = make_isotropic(16, sgs="vreman")
+    k = [diagnostics(s)["k"]]
+    for t in (0.5, 1.0, 1.5):
+        s.advance(t_end=t * tau)
+        d = diagnostics(s)
+        k.append(d["k"])
+        assert all(np.isfinite(v) for v in d.values())
+    assert np.all(np.diff(k) < 0)

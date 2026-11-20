@@ -15,7 +15,7 @@ gas: {gamma: 1.4, prandtl: 0.72, prandtl_t: 0.9, viscosity: sutherland}
 
 numerics: {precision: float64, flux: keep_pe, sensor: ducros_pressure, dissipation: roe, cfl: 0.8, rk: ssprk3}
 
-sgs: {model: vreman, c: 0.07}
+sgs: {model: vreman}   # c: model constant (defaults: vreman 0.07, wale 0.5, smagorinsky 0.17)
 
 wall_model:
   type: equilibrium_ode       # or: algebraic

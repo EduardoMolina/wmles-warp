@@ -36,6 +36,11 @@ BC_OUTFLOW = 6
 BC_DIRICHLET = 7  # filled on the host (verification)
 
 DISS_NONE, DISS_RUSANOV, DISS_ROE = 0, 1, 2
+SGS_NONE, SGS_VREMAN, SGS_WALE, SGS_SMAGORINSKY = 0, 1, 2, 3
+
+# statistics sample vector (float64): means and second moments of primitive variables
+STAT_FIELDS = ("rho", "u", "v", "w", "p", "T", "uu", "vv", "ww", "uv", "uw", "vw", "pp", "TT", "rhou", "mut")
+vec16d = wp.types.vector(len(STAT_FIELDS), wp.float64)
 VISC_SUTHERLAND, VISC_POWER, VISC_CONSTANT = 0, 1, 2
 
 
@@ -50,6 +55,11 @@ def make_kernels(prec: Precision):
     half = scalar(0.5)
     two = scalar(2.0)
     two_thirds = scalar(2.0 / 3.0)
+    four_thirds = scalar(4.0 / 3.0)
+    tenth = scalar(0.1)
+    # NOTE: fractional constants must be defined here (closure, exact in the kernel precision).
+    # Inside a kernel, Python float literals are float32: scalar(2.0 / 3.0) there computes
+    # 2/3 in float32 and then converts, silently losing precision in float64 kernels.
     tiny = scalar(1e-30)
 
     @wp.struct
@@ -72,6 +82,8 @@ def make_kernels(prec: Precision):
         use_sensor: int  # 0: none (phi = 1), 1: Ducros, 2: Ducros x pressure sensor (compression only)
         pressure_gain: scalar
         viscous: int
+        sgs_model: int  # 0 none, 1 Vreman, 2 WALE, 3 Smagorinsky
+        sgs_c: scalar
 
     # ---- thermodynamics -----------------------------------------------------------------
     @wp.func
@@ -282,7 +294,7 @@ def make_kernels(prec: Precision):
                 ug = two * u_wall - velocity(Wi)
                 Tg = temperature(Wi, p)
                 if bctype == 1:
-                    Tg = wp.max(two * t_wall - Tg, scalar(0.1) * t_wall)
+                    Tg = wp.max(two * t_wall - Tg, tenth * t_wall)
                 Wg = vec5(Wi[4] / (p.R * Tg), ug[0], ug[1], ug[2], Wi[4])
             elif bctype == 2:
                 ui = velocity(Wi)
@@ -369,6 +381,45 @@ def make_kernels(prec: Precision):
         th[i, j, k] = theta
 
     @wp.kernel(module="unique")
+    def k_sgs(
+        W: wp.array3d(dtype=vec5),
+        GU: wp.array3d(dtype=mat33),
+        vol: wp.array3d(dtype=scalar),
+        p: Params,
+        mut: wp.array3d(dtype=scalar),
+    ):
+        """SGS eddy viscosity mu_t = rho nu_t, filter width Delta = V^(1/3).
+        Vreman (2004), WALE (Nicoud & Ducros 1999), static Smagorinsky."""
+        a, b, c = wp.tid()
+        i = a + 1
+        j = b + 1
+        k = c + 1
+        g = GU[i, j, k]  # g[m, n] = d u_m / d x_n
+        d2 = wp.pow(vol[i, j, k], two_thirds)
+        nut = zero
+        if p.sgs_model == 1:
+            bb = d2 * (g * wp.transpose(g))  # beta_ij = Delta^2 sum_m alpha_mi alpha_mj, alpha_mi = g[i, m]
+            B = (bb[0, 0] * bb[1, 1] - bb[0, 1] * bb[0, 1] + bb[0, 0] * bb[2, 2] - bb[0, 2] * bb[0, 2]
+                 + bb[1, 1] * bb[2, 2] - bb[1, 2] * bb[1, 2])
+            aa = wp.ddot(g, g)
+            if aa > tiny and B > zero:
+                nut = p.sgs_c * wp.sqrt(B / aa)
+        elif p.sgs_model == 2:
+            S = half * (g + wp.transpose(g))
+            g2 = g * g
+            tr = (g2[0, 0] + g2[1, 1] + g2[2, 2]) / scalar(3.0)
+            Sd = half * (g2 + wp.transpose(g2)) - tr * wp.identity(n=3, dtype=scalar)
+            ss = wp.ddot(S, S)
+            sd = wp.ddot(Sd, Sd)
+            den = wp.pow(ss, scalar(2.5)) + wp.pow(sd, scalar(1.25))
+            if den > tiny:
+                nut = p.sgs_c * p.sgs_c * d2 * wp.pow(sd, scalar(1.5)) / den
+        elif p.sgs_model == 3:
+            S = half * (g + wp.transpose(g))
+            nut = p.sgs_c * p.sgs_c * d2 * wp.sqrt(two * wp.ddot(S, S))
+        mut[i, j, k] = W[i, j, k][0] * nut
+
+    @wp.kernel(module="unique")
     def k_flux(
         W: wp.array3d(dtype=vec5),
         GU: wp.array3d(dtype=mat33),
@@ -437,6 +488,8 @@ def make_kernels(prec: Precision):
             uf = half * (uL + uR)
             mu = viscosity(Tf, p)
             mt = half * (mut[iL, jL, kL] + mut[iR, jR, kR])
+            if (fa == 0 and nodiss_lo == 1) or (fa == nfaces - 1 and nodiss_hi == 1):
+                mt = zero  # no eddy viscosity on wall/slip faces (ghost values are mirrors)
             mue = mu + mt
             kappa = p.cp * (mu / p.prandtl + mt / p.prandtl_t)
             div = gu[0, 0] + gu[1, 1] + gu[2, 2]
@@ -516,9 +569,44 @@ def make_kernels(prec: Precision):
         V = vol[i, j, k]
         if p.viscous == 1:
             mu = viscosity(temperature(Wc, p), p) + mut[i, j, k]
-            nu = mu / Wc[0] * wp.max(scalar(4.0 / 3.0), p.gamma / p.prandtl)
+            nu = mu / Wc[0] * wp.max(four_thirds, p.gamma / p.prandtl)
             lam = lam + two * nu * (wp.dot(sx, sx) + wp.dot(sy, sy) + wp.dot(sz, sz)) / V
         wp.atomic_min(dtmin, 0, cfl * V / lam)
+
+    @wp.kernel(module="unique")
+    def k_momentum(U: wp.array3d(dtype=vec5), d: vec3, vol: wp.array3d(dtype=scalar), ng: int,
+                   out: wp.array3d(dtype=wp.float64)):
+        a, b, c = wp.tid()
+        Uc = U[a + ng, b + ng, c + ng]
+        out[a, b, c] = wp.float64((Uc[1] * d[0] + Uc[2] * d[1] + Uc[3] * d[2]) * vol[a + ng, b + ng, c + ng])
+
+    @wp.kernel(module="unique")
+    def k_add_momentum(U: wp.array3d(dtype=vec5), d: vec3, dm: scalar, ng: int):
+        """Add a uniform momentum increment dm * d per unit volume, keeping internal energy."""
+        a, b, c = wp.tid()
+        Uc = U[a + ng, b + ng, c + ng]
+        m0 = vec3(Uc[1], Uc[2], Uc[3])
+        m1 = m0 + dm * d
+        Uc[1] = m1[0]
+        Uc[2] = m1[1]
+        Uc[3] = m1[2]
+        Uc[4] = Uc[4] + half * (wp.dot(m1, m1) - wp.dot(m0, m0)) / Uc[0]
+        U[a + ng, b + ng, c + ng] = Uc
+
+    @wp.kernel(module="unique")
+    def k_stats(W: wp.array3d(dtype=vec5), mut: wp.array3d(dtype=scalar), ng: int, p: Params,
+                acc: wp.array3d(dtype=vec16d)):
+        a, b, c = wp.tid()
+        Wc = W[a + ng, b + ng, c + ng]
+        r = wp.float64(Wc[0])
+        u = wp.float64(Wc[1])
+        v = wp.float64(Wc[2])
+        w = wp.float64(Wc[3])
+        pr = wp.float64(Wc[4])
+        T = wp.float64(temperature(Wc, p))
+        smp = vec16d(r, u, v, w, pr, T, u * u, v * v, w * w, u * v, u * w, v * w, pr * pr, T * T, r * u,
+                     wp.float64(mut[a + ng, b + ng, c + ng]))
+        acc[a, b, c] = acc[a, b, c] + smp
 
     return {
         "Params": Params,
@@ -527,8 +615,12 @@ def make_kernels(prec: Precision):
         "set_cons": k_set_cons,
         "bc": k_bc,
         "gradients": k_gradients,
+        "sgs": k_sgs,
         "flux": k_flux,
         "residual": k_residual,
         "rk": k_rk,
         "dt": k_dt,
+        "momentum": k_momentum,
+        "add_momentum": k_add_momentum,
+        "stats": k_stats,
     }

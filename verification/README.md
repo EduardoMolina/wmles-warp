@@ -21,3 +21,24 @@ Notes
 - Contact discontinuities receive dissipation only through the density term of the sensor; small oscillations remain near contacts, as expected from a minimally dissipative scheme.
 
 Not yet done in Phase 1: isentropic vortex long-time transport, laminar compressible flat plate, CPU-vs-GPU comparison (needs the g6e node).
+
+## Phase 2: SGS and compressible turbulence
+
+| Study | Script | Result |
+|---|---|---|
+| SGS kernels (Vreman, WALE, Smagorinsky) vs numpy reference, random gradients | `tests/test_sgs.py` | agreement to 1e-12; Vreman/WALE vanish in pure shear |
+| Taylor–Green vortex, Re = 1600, M = 0.1, Roe + `ducros_pressure` | `tgv.py --re 1600`, `plot_tgv.py` | see table below and `results/tgv_re1600_dissipation.png` |
+| Decaying compressible isotropic turbulence, Mt = 0.6, Re_λ = 100 (Johnsen et al. 2010 setup) | `isotropic.py --n 32/64` | stable with shocklets; k/k0 at t/τ = 4: 0.289 (32³), 0.289 (64³); T_rms 2.9e-2 / 3.1e-2; sensor-active cells 14% → 6% with refinement |
+| Wall-resolved channel Re_τ = 180 (pipeline) | `cases/channel_retau180`, `channel_profiles.py` | 2000-step CPU smoke run stable; u_τ from wall shear (0.08643) and from mass-flux forcing (0.08641) agree, i.e. the global momentum balance closes. Statistically converged profiles need a GPU run (~3×10⁵ steps) |
+| Multi-GPU throughput / scaling | `benchmark.py` | to be run on the g6e.48xlarge (8× L40S) |
+
+TGV Re = 1600 peak dissipation rate ε = −dk/dt (DNS: 0.0127 at t ≈ 9.0, van Rees et al. 2011):
+
+| grid | no SGS | Vreman | WALE |
+|---|---|---|---|
+| 32³ | 0.0094 at t = 10.75 | 0.0116 at t = 6.45 | 0.0123 at t = 7.25 |
+| 64³ | 0.0110 at t = 8.45 | 0.0104 at t = 7.55 | 0.0106 at t = 7.95 |
+
+At t = 0 the no-SGS run reproduces the laminar dissipation ν⟨|ω|²⟩ = 0.75/1600 = 4.7e-4. Vreman and WALE add about 7e-4 in the laminar/transitional phase (neither vanishes for the 3D initial TGV field), which moves the peak earlier on coarse grids. This SGS contribution at t = 0 drops from 7.4e-4 (32³) to 1.9e-4 (64³), the expected Δ² scaling.
+
+At 64³ the curves move toward the DNS, but none has converged: all peak about 15% low and about 1 time unit early. A second-order scheme needs about 128³ for this case (GPU run). In this low-Re transitional flow the no-SGS run (KEEP-PE with the sensor essentially inactive) is closest to the DNS at 64³, because Vreman and WALE over-dissipate during transition (shoulder near t ≈ 6). This is a property of the case, not of wall-bounded high-Re WMLES, where the SGS model is still needed.

@@ -1,0 +1,32 @@
+# Wall-resolved LES of turbulent channel flow, Re_tau ~ 180 (Moser, Kim & Mansour 1999).
+# Nondimensionalized by half-height h, bulk velocity U_b, wall temperature.
+# Generate the grid first:  python cases/channel_retau180/make_grid.py
+grid: {file: channel_retau180_32x64x32.p3d, format: plot3d}
+
+flow: {mach: 0.2, reynolds: 2800.0, temperature: 300.0, ref_length: 1.0}   # bulk Mach, Re_b = U_b h / nu
+
+gas: {gamma: 1.4, prandtl: 0.72, prandtl_t: 0.9, viscosity: sutherland}
+
+numerics: {precision: float64, flux: keep_pe, sensor: ducros_pressure, dissipation: roe, cfl: 0.8}
+
+sgs: {model: vreman}
+
+wall_model: {type: none}
+
+boundaries:
+  - {faces: [jmin, jmax], type: wall, thermal: isothermal, T_wall: 1.0}
+
+periodic:
+  - {translation: [6.283185307179586, 0.0, 0.0]}
+  - {translation: [0.0, 0.0, 3.141592653589793]}
+
+forcing: {type: constant_mass_flux, direction: [1.0, 0.0, 0.0], target: 1.0}
+
+init: {type: channel, center: 0.0, half_height: 1.0, amplitude: 0.15}
+
+# ~10^4 steps per flow-through (dt limited by the wall-normal spacing); run on GPU in production
+run: {steps: 300000, output_every: 20000, stats_start: 150000, stats_every: 5, restart_every: 20000, log_every: 1000}
+
+parallel: {devices: auto, partitions: auto}
+
+output: {dir: out, fields: [rho, u, v, w, p, T, mach], format: vtm}

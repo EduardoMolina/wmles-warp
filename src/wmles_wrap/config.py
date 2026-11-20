@@ -77,7 +77,14 @@ class NumericsCfg:
 @dataclass
 class SgsCfg:
     model: str = "vreman"  # vreman | wale | smagorinsky | none
-    c: float = 0.07
+    c: float | None = None  # model constant; None -> model default (see SGS_DEFAULT_C)
+
+    @property
+    def coefficient(self) -> float:
+        return self.c if self.c is not None else SGS_DEFAULT_C.get(self.model, 0.0)
+
+
+SGS_DEFAULT_C = {"vreman": 0.07, "wale": 0.5, "smagorinsky": 0.17}
 
 
 @dataclass
@@ -117,6 +124,7 @@ class ForcingCfg:
     type: str = "none"  # none | body_force | constant_mass_flux
     direction: list[float] = field(default_factory=lambda: [1.0, 0.0, 0.0])
     value: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])  # body_force (per unit mass)
+    target: float = 1.0  # constant_mass_flux: bulk momentum per unit volume along direction
 
 
 @dataclass
@@ -125,10 +133,22 @@ class RunCfg:
     t_end: float | None = None
     dt: float | None = None  # fixed time step; None -> CFL-based
     log_every: int = 100
+    stats_every: int = 1
     output_every: int = 0
     stats_start: int = 0
     restart_every: int = 0
     restart_file: str | None = None
+
+
+@dataclass
+class InitCfg:
+    type: str = "freestream"  # freestream | channel
+    # channel: turbulent mean profile u = (8/7) U_b (1 - |eta|)^(1/7) along forcing.direction,
+    # eta = (y - center) / half_height, plus divergence-free-ish perturbations
+    center: float = 0.0
+    half_height: float = 1.0
+    amplitude: float = 0.1
+    seed: int = 0
 
 
 @dataclass
@@ -156,6 +176,7 @@ class CaseConfig:
     periodic: list[PeriodicCfg] = field(default_factory=list)
     forcing: ForcingCfg = field(default_factory=ForcingCfg)
     run: RunCfg = field(default_factory=RunCfg)
+    init: InitCfg = field(default_factory=InitCfg)
     parallel: ParallelCfg = field(default_factory=ParallelCfg)
     output: OutputCfg = field(default_factory=OutputCfg)
     case_dir: Path = field(default_factory=Path.cwd)
@@ -262,6 +283,7 @@ def _validate(cfg: CaseConfig) -> None:
     choice(cfg.wall_model.type, ("equilibrium_ode", "algebraic", "none"), "wall_model.type")
     choice(cfg.gas.viscosity, ("sutherland", "power", "constant"), "gas.viscosity")
     choice(cfg.forcing.type, ("none", "body_force", "constant_mass_flux"), "forcing.type")
+    choice(cfg.init.type, ("freestream", "channel"), "init.type")
     if cfg.flow.mach <= 0 or cfg.flow.reynolds <= 0 or cfg.flow.temperature <= 0:
         raise ConfigError("flow.mach, flow.reynolds and flow.temperature must be positive")
     if cfg.numerics.ghost_layers < 2:

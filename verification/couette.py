@@ -34,6 +34,7 @@ def run_couette(ny=16, mach=0.8, reynolds=10.0, t_end=60.0, partitions=1, stretc
             "flow": {"mach": mach, "reynolds": reynolds, "temperature": 300.0},
             "gas": {"viscosity": "constant"},
             "numerics": {"precision": precision, "cfl": 0.8},
+            "sgs": {"model": "none"},
             "boundaries": [
                 {"faces": ["jmin"], "type": "wall", "thermal": "isothermal", "T_wall": 1.0},
                 {"faces": ["jmax"], "type": "wall", "thermal": "isothermal", "T_wall": 1.0,

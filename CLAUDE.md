@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Compressible wall-modeled LES solver: explicit, cell-centered, multiblock finite volume, written in Python + NVIDIA Warp, single-process multi-GPU (one process drives N CUDA devices). Cases are driven by a YAML file (see [cases/channel/case.yaml](cases/channel/case.yaml)); output is PyVista `.vtm` + `.pvd`. The roadmap (Phase 0 infrastructure → 1 code verification → 2 SGS/compressible turbulence → 3 wall-model validation → OAT15A/CRM transonic buffet) lives in `~/.claude/plans/i-would-like-to-dreamy-lerdorf.md`. Phases 0–2 are done (infrastructure, numerics + code verification, SGS/turbulence). Phase 3 (wall models and their validation) is on branch `phase3-wallmodel`. Verification results and scripts are in [verification/README.md](verification/README.md).
+Compressible wall-modeled LES solver: explicit, cell-centered, multiblock finite volume, written in Python + NVIDIA Warp, single-process multi-GPU (one process drives N CUDA devices). Cases are driven by a YAML file (see [cases/channel/case.yaml](cases/channel/case.yaml)); output is PyVista `.vtm` + `.pvd`. The roadmap (Phase 0 infrastructure → 1 code verification → 2 SGS/compressible turbulence → 3 wall-model validation → OAT15A/CRM transonic buffet) and the status of each phase live in [docs/plan.md](docs/plan.md); keep it updated when a phase item is completed. Phases 0–2 are done (infrastructure, numerics + code verification, SGS/turbulence). Phase 3 (wall models and their validation) is in progress on branch `phase3-wallmodel`. Verification results and scripts are in [verification/README.md](verification/README.md).
 
 ## Environment and commands
 

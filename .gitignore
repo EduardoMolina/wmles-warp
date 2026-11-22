@@ -9,3 +9,7 @@ cases/**/a.out
 verification/results/logs/
 cases/channel_retau180/*.p3d
 runs/
+cases/a_airfoil/*.xyz
+cases/a_airfoil/*.p3d
+cases/a_airfoil/case_coarse.yaml
+cases/a_airfoil/out*/

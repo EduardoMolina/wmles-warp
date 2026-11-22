@@ -17,7 +17,7 @@ transonic buffet on the NASA Common Research Model (CRM).
 | 0 | Infrastructure | done | `main` `cb1c8ad` |
 | 1 | Code verification | done; a few items deferred (see Phase 1) | `c215c1c` |
 | 2 | SGS and compressible turbulence | done on CPU; converged runs need the GPU node | `c1e232e` |
-| 3 | Wall-model validation | in progress: models and channel at Re_τ = 5200 done | `main` `3077414` |
+| 3 | Wall-model validation | in progress: models and channel at Re_τ = 5200 done; A-airfoil set up | `main` `3077414` |
 | 4 | CGNS, OAT15A buffet, CRM | not started | — |
 
 ## Environment and design drivers
@@ -64,7 +64,7 @@ src/wmles_wrap/
   wallmodel/reference.py # numpy reference of the wall models (the kernels must match it to 1e-10)
   verify/mms.py, riemann.py  # manufactured solutions, exact Riemann solver
 verification/            # study scripts; results in verification/results/
-cases/                   # channel (Re_τ = 5200 UMD grids), channel_retau180
+cases/                   # channel (Re_τ = 5200 UMD grids), channel_retau180, a_airfoil
 ```
 
 **Differences from the original design**
@@ -81,7 +81,9 @@ cases/                   # channel (Re_τ = 5200 UMD grids), channel_retau180
   from it, so the partitioner never has to match partial faces.
 - The halo exchange is still synchronous. Overlapping it with compute (streams/events) is still to
   do.
-- Probes and surface output are still to do; they are needed for buffet spectra.
+- Surface output is time-averaged only: wall pressure, modeled τ_w and q on wall-modeled faces in
+  `stats.npz`, plus a C_L/C_D history in `forces.dat`. Probes and instantaneous surface output are
+  still to do; they are needed for buffet spectra.
 
 ## Phase 0: infrastructure — done
 
@@ -177,10 +179,54 @@ on the ar1 grid):
    heated isothermal-wall case. This validates the energy equation and q_w in the solver.
 3. **Zero-pressure-gradient turbulent boundary layer** with recycling/rescaling or synthetic inflow:
    Cf(Re_θ) against correlations and DNS.
-4. **Separation and shock:**
+4. **Near-stall airfoil: A-airfoil** (step between the channel and the OAT15A buffet case). See
+   the section below.
+5. **Separation and shock:**
    - Bachalo–Johnson transonic axisymmetric bump (shock-induced separation, the direct precursor
      to buffet);
    - optionally, the NASA wall-mounted hump.
+
+### A-airfoil near stall — set up, production run pending
+
+Why this case: it is the first external-aerodynamics case. It tests the far-field BCs on a
+multiblock C-mesh with a wake cut, and the wall model under a strong adverse pressure gradient
+with trailing-edge separation, at low Mach and without shocks. That isolates the wall-model
+questions from the shock/buffet dynamics of the OAT15A.
+
+- **Conditions:** Aérospatiale A-airfoil, α = 13.3°, Re_c = 1.0×10⁷, M = 0.15, T_∞ = 285 K.
+- **Reference:** WRLES by Tamaki & Kawai, AIAA J. 61(2), 698–711 (2023),
+  doi:10.2514/1.J062066. The
+  [database](https://www.klab.mech.tohoku.ac.jp/database/2022TamakiAIAAJ/README.txt) has Cp, Cf,
+  H and Re_θ along the surface, plus velocity/stress profiles and momentum and TKE budgets at
+  several x/c.
+- **Case:** [cases/a_airfoil/case.yaml](../cases/a_airfoil/case.yaml).
+  - Grid `a_airfoil_C.xyz` (not in git): 4-block C-mesh, 36.7 M cells, far field at about 30c,
+    spanwise-periodic span 0.048c (81 cells).
+  - First wall cell 2.8×10⁻⁴c (y⁺ ≈ 100); wall-tangential spacing 6–8.4×10⁻⁴c.
+  - Equilibrium ODE wall model on both surfaces, exchange at cell 3. Vreman SGS, float32.
+  - Riemann far field on all outer faces; uniform free-stream start.
+- **Run:** 30 CTU (c/U_∞), statistics over t = 20–30 (`run.stats_start_time`).
+- **Cost:** dt ≈ 1.4×10⁻⁵ CTU (acoustic CFL at M = 0.15), about 2.1 M steps in total.
+  - On one A10G (g5.4xlarge) at about 70 Mcell-steps/s, that is about 13 days, i.e. ~10 h per CTU.
+  - GPU memory is about 15 GB (24 GB available).
+  - Restarts carry the statistics sums and the wall-model state, so the run can be split into
+    jobs and moved to the 8× L40S node.
+- **Smoke test (CPU, float64):** grid coarsened 4×2×9 (516 k cells) with
+  [cases/a_airfoil/coarsen.py](../cases/a_airfoil/coarsen.py), 6 partitions.
+  - Connectivity correct: wake cut and three block joins, plus spanwise periodicity.
+  - Stable for 3000 steps (0.1 CTU) of the impulsive start; residuals fall about 20× as the
+    start-up pressure pulse leaves. Wall statistics, forces, restart pruning and the
+    post-processing script work.
+- **Comparison:** `verification/airfoil_surface.py` plots mean Cp and Cf against the WRLES
+  surface data, and gives C_L/C_D from the surface integral and from the `forces.dat` history.
+- **Watch for:**
+  1. The wall model is applied over the whole surface, so the laminar/transitional leading-edge
+     region is treated as turbulent. Expect a Cf mismatch near the LE.
+  2. Size and onset of the trailing-edge separation on the upper surface.
+  3. The span (0.048c) is narrow relative to the trailing-edge boundary layer near stall.
+  4. There is no far-field circulation correction at 30c.
+- **Possible follow-ups:** exchange location by distance; a sponge layer or vortex-corrected far
+  field; a wider span.
 
 ## Phase 4 (roadmap): buffet and CRM
 
@@ -189,7 +235,7 @@ on the ar1 grid):
 - **Async halo exchange** (streams/events), plus probes and surface/wall-pressure output for
   spectra.
 - **Intermediate buffet case: OAT15A airfoil** (M = 0.73, Re_c = 3×10⁶, α ≈ 3.5°) as a
-  spanwise-periodic slab. Validate the buffet frequency (St ≈ 0.07) and the pressure RMS.
+  spanwise-periodic slab. It reuses the airfoil setup validated on the A-airfoil (Phase 3). Validate the buffet frequency (St ≈ 0.07) and the pressure RMS.
 - **CRM** (DPW/HLPW structured grids) at transonic buffet conditions: M ≈ 0.85, Re_c ≈ 5×10⁶,
   α beyond buffet onset (about 3.5–5°). Compare with NASA Ames 11-ft and ETW unsteady PSP and
   Kulite data.

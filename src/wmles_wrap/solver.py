@@ -167,11 +167,14 @@ class Solver:
             self.integrator.forcing_history.clear()
 
     def write_stats(self) -> Path | None:
-        """Write time-averaged fields (vtm) and per-parent-block arrays (npz)."""
+        """Write time-averaged fields (vtm) and per-parent-block arrays (npz). Wall-modeled faces
+        add ``wall{b:04d}_{face}`` (means of WALL_FIELDS), ``wallxf...`` (face centroids) and
+        ``wallS...`` (face area vectors pointing into the fluid)."""
         I = self.integrator
         if I.stats_count == 0:
             return None
-        from .numerics.kernels import STAT_FIELDS
+        from .config import FACE_NAMES
+        from .numerics.kernels import STAT_FIELDS, WALL_FIELDS
 
         blocks = []
         parent = [np.zeros(tuple(n - 1 for n in x.shape[:3]) + (len(STAT_FIELDS),)) for x in self.parent_blocks]
@@ -182,11 +185,100 @@ class Solver:
             parent[s.parent][lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = np.stack([m[k] for k in STAT_FIELDS], -1)
         writer = SnapshotWriter(self.out_dir, basename="stats")
         path = writer.write(self.step, self.time, blocks)
+        walls = {}
+        for (b, f), a in self._parent_wall_sums().items():
+            key = f"{b:04d}_{FACE_NAMES[f]}"
+            xf, S = self._wall_face_geometry(b, f)
+            walls.update({f"wall{key}": a / I.stats_count, f"wallxf{key}": xf, f"wallS{key}": S})
         np.savez(self.out_dir / "stats.npz", fields=np.array(STAT_FIELDS), count=I.stats_count, step=self.step,
                  time=self.time, **{f"block{b:04d}": a for b, a in enumerate(parent)},
                  **{f"xc{b:04d}": self._parent_centroids(b) for b in range(len(parent))},
-                 forcing=np.array(I.forcing_history))
+                 forcing=np.array(I.forcing_history), wall_fields=np.array(WALL_FIELDS), **walls)
         return path
+
+    # ---- statistics in parent-block layout (stats.npz, restart) -------------------------------
+    def _parent_stats_sums(self) -> list[np.ndarray]:
+        """Raw (un-normalized) cell statistics sums per parent block."""
+        from .numerics.kernels import STAT_FIELDS
+
+        out = [np.zeros(tuple(n - 1 for n in x.shape[:3]) + (len(STAT_FIELDS),)) for x in self.parent_blocks]
+        for s in self.subs:
+            if s.id in self.integrator.stats:
+                lo, hi = s.lo, s.hi
+                a = self.integrator.stats[s.id].numpy()
+                out[s.parent][lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = a.reshape(a.shape[:3] + (len(STAT_FIELDS),))
+        return out
+
+    def _wall_slices(self, s: SubBlock, ax: int) -> tuple[slice, slice]:
+        """Slices of a sub-block's wall face (tangential cells) in the parent face array."""
+        t = [a for a in range(3) if a != ax]
+        return slice(s.lo[t[0]], s.hi[t[0]]), slice(s.lo[t[1]], s.hi[t[1]])
+
+    def _parent_face_arrays(self, values: dict[tuple[int, int, int], np.ndarray]) -> dict[tuple[int, int], np.ndarray]:
+        """Assemble per-sub-block face arrays {(sid, axis, side): (n_t1, n_t2[, ...])} into
+        parent-face arrays {(parent block, face): ...}."""
+        out: dict[tuple[int, int], np.ndarray] = {}
+        subs = {s.id: s for s in self.subs}
+        for (sid, ax, side), a in values.items():
+            s = subs[sid]
+            key = (s.parent, 2 * ax + side)
+            if key not in out:
+                pnc = [n - 1 for n in s.parent_nn]
+                out[key] = np.zeros(tuple(pnc[t] for t in range(3) if t != ax) + a.shape[2:])
+            out[key][self._wall_slices(s, ax)] = a
+        return out
+
+    def _parent_wall_sums(self) -> dict[tuple[int, int], np.ndarray]:
+        """(parent block, face) -> raw sums (n_t1, n_t2, len(WALL_FIELDS)) on wall-modeled faces."""
+        return self._parent_face_arrays(self.integrator.wall_sums())
+
+    def _wall_face_geometry(self, b: int, f: int) -> tuple[np.ndarray, np.ndarray]:
+        """Face centroids and area vectors (pointing into the fluid) of a parent block face."""
+        x = self.parent_blocks[b]
+        ax, side = f // 2, f % 2
+
+        def layer(idx):
+            P = np.take(x, idx, axis=ax)
+            return P, 0.25 * (P[:-1, :-1] + P[1:, :-1] + P[:-1, 1:] + P[1:, 1:])
+
+        P, xf = layer(0 if side == 0 else x.shape[ax] - 1)
+        _, x2 = layer(1 if side == 0 else x.shape[ax] - 2)
+        S = 0.5 * np.cross(P[1:, 1:] - P[:-1, :-1], P[:-1, 1:] - P[1:, :-1])
+        if np.sum(S * (x2 - xf)) < 0:
+            S = -S
+        return xf, S
+
+    # ---- force monitor ------------------------------------------------------------------------
+    def force_coefficients(self) -> np.ndarray:
+        """[Fx, Fy, Fz, CL, CD] on the wall-modeled faces. CL/CD use flow.ref_area (NaN if unset),
+        free-stream dynamic pressure 1/2 (rho_inf = |u_inf| = 1), drag along the free stream and
+        lift normal to it in the x-y plane."""
+        F = self.integrator.wall_forces()
+        cl = cd = np.nan
+        if self.cfg.flow.ref_area:
+            a, b = np.radians(self.cfg.flow.alpha), np.radians(self.cfg.flow.beta)
+            qa = 0.5 * self.cfg.flow.ref_area
+            cd = float(F @ [np.cos(a) * np.cos(b), np.sin(a) * np.cos(b), np.sin(b)]) / qa
+            cl = float(F @ [-np.sin(a), np.cos(a), 0.0]) / qa
+        return np.array([*F, cl, cd])
+
+    def _log_forces(self) -> str:
+        c = self.force_coefficients()
+        path = self.out_dir / "forces.dat"
+        new = not path.exists()
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        with open(path, "a") as fh:
+            if new:
+                fh.write("# step time Fx Fy Fz CL CD  (forces on wall-modeled faces, nondimensional)\n")
+            fh.write(f"{self.step} {self.time:.10e} " + " ".join(f"{v:.10e}" for v in c) + "\n")
+        return f"  CL {c[3]:.5f} CD {c[4]:.5f}" if self.cfg.flow.ref_area else f"  F {c[0]:.4e} {c[1]:.4e}"
+
+    def _take_stats_sample(self) -> bool:
+        r = self.cfg.run
+        if r.stats_start_time is not None:
+            t0 = r.stats_start_time
+            return self.step % r.stats_every == 0 and self.time >= t0 - 1e-12 * max(1.0, abs(t0))
+        return bool(r.stats_start) and self.step >= r.stats_start and (self.step - r.stats_start) % r.stats_every == 0
 
     def _parent_centroids(self, b: int) -> np.ndarray:
         x = self.parent_blocks[b]
@@ -208,8 +300,7 @@ class Solver:
             n += 1
             if self.integrator.mass_flux:
                 self.integrator.apply_mass_flux_control(dt, self.time)
-            if cfg.run.stats_start and self.step >= cfg.run.stats_start and \
-                    (self.step - cfg.run.stats_start) % max(cfg.run.stats_every, 1) == 0:
+            if self._take_stats_sample():
                 self.integrator.accumulate_stats()
             if log_every and self.step % log_every == 0:
                 res = self.integrator.residual_norms()
@@ -220,6 +311,7 @@ class Solver:
                     extra = f"  forcing {self.integrator.forcing_history[-1][1]:.4e}"
                 if any(d.wm for d in self.integrator.data.values()):
                     extra += f"  u_tau(wm) {self.integrator.wall_friction_velocity():.5f}"
+                    extra += self._log_forces()
                 log.info("step %8d  t %.6e  dt %.3e  res(rho,rhoE) %.3e %.3e  %.3g Mcell-steps/s%s",
                          self.step, self.time, dt, res[0], res[4], ncell * n / el / 1e6, extra)
                 if not np.all(np.isfinite(res)):
@@ -230,6 +322,13 @@ class Solver:
     def run(self) -> None:
         """Run according to cfg.run: steps/t_end, output, restart cadence."""
         cfg = self.cfg.run
+        forces = self.out_dir / "forces.dat"
+        if self.step == 0:  # fresh run: start a new force history
+            forces.unlink(missing_ok=True)
+        elif forces.exists():  # restart: append, dropping rows written after the restart step
+            keep = [ln for ln in forces.read_text().splitlines(keepends=True)
+                    if ln.startswith("#") or int(ln.split()[0]) <= self.step]
+            forces.write_text("".join(keep))
         writer = SnapshotWriter(self.out_dir)
         self.write_output(writer)
         target = cfg.steps if cfg.steps > 0 else None
@@ -246,6 +345,9 @@ class Solver:
                 self.write_stats()
             if cfg.restart_every and self.step % cfg.restart_every == 0:
                 self.write_restart(self.out_dir / f"restart_{self.step:08d}.npz")
+                if cfg.restart_keep > 0:
+                    for old in sorted(self.out_dir.glob("restart_[0-9]*.npz"))[:-cfg.restart_keep]:
+                        old.unlink()
         if not cfg.output_every or self.step % cfg.output_every != 0:
             self.write_output(writer)
         self.write_stats()
@@ -290,11 +392,55 @@ class Solver:
         return writer.write(self.step, self.time, blocks)
 
     def write_restart(self, path: str | Path) -> None:
-        write_restart(path, self.step, self.time, self.parent_states(), self.prec.name)
+        """State per parent block, the wall-model state (tau_w, q: the equilibrium model resumes
+        warm-started, as in an uninterrupted run) and, once sampling has started, the accumulated
+        statistics sums (so long averaging windows survive interruptions)."""
+        from .config import FACE_NAMES
+
+        extra = {}
+        I = self.integrator
+        wm = {(sid, ax, sd): f for sid, d in I.data.items() for (ax, sd), f in d.wm.items()}
+        if wm and all(f.warm for f in wm.values()):
+            tw = self._parent_face_arrays({k: f.tw.numpy().astype(np.float64) for k, f in wm.items()})
+            q = self._parent_face_arrays({k: f.q.numpy().astype(np.float64) for k, f in wm.items()})
+            extra.update({f"wmtw{b:04d}_{FACE_NAMES[f]}": a for (b, f), a in tw.items()})
+            extra.update({f"wmq{b:04d}_{FACE_NAMES[f]}": a for (b, f), a in q.items()})
+        if I.stats_count > 0:
+            extra["stats_count"] = I.stats_count
+            extra.update({f"stats{b:04d}": a for b, a in enumerate(self._parent_stats_sums())})
+            extra.update({f"wallsum{b:04d}_{FACE_NAMES[f]}": a for (b, f), a in self._parent_wall_sums().items()})
+        write_restart(path, self.step, self.time, self.parent_states(), self.prec.name, extra)
 
     def read_restart(self, path: str | Path) -> None:
-        self.step, self.time, states = read_restart(path)
+        from .config import FACE_NAMES
+
+        self.step, self.time, states, extra = read_restart(path, with_extra=True)
         self.load_parent_states(states)
+        for d in self.integrator.data.values():
+            s = d.sub
+            for (ax, side), f in d.wm.items():
+                key = f"{s.parent:04d}_{FACE_NAMES[2 * ax + side]}"
+                if f"wmtw{key}" in extra:
+                    sl = self._wall_slices(s, ax)
+                    f.tw = wp.array(np.ascontiguousarray(extra[f"wmtw{key}"][sl]).astype(self.prec.np_dtype),
+                                    dtype=self.prec.vec3, device=s.device)
+                    f.q = wp.array(np.ascontiguousarray(extra[f"wmq{key}"][sl]).astype(self.prec.np_dtype),
+                                   dtype=self.prec.scalar, device=s.device)
+                    f.warm = True
+        if "stats_count" not in extra:
+            return
+        cell, wall = {}, {}
+        for s in self.subs:
+            lo, hi = s.lo, s.hi
+            cell[s.id] = extra[f"stats{s.parent:04d}"][lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+        for sid, d in self.integrator.data.items():
+            s = d.sub
+            for ax, side in d.wm:
+                key = f"wallsum{s.parent:04d}_{FACE_NAMES[2 * ax + side]}"
+                if key in extra:
+                    wall[(sid, ax, side)] = extra[key][self._wall_slices(s, ax)]
+        self.integrator.set_stats_sums(int(extra["stats_count"]), cell, wall)
+        log.info("restart: resumed statistics with %d samples", int(extra["stats_count"]))
 
     # ---- diagnostics ------------------------------------------------------------------------
     def summary(self) -> str:

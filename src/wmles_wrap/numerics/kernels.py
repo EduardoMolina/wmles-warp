@@ -43,6 +43,9 @@ WM_MAX_POINTS = 64
 # statistics sample vector (float64): means and second moments of primitive variables
 STAT_FIELDS = ("rho", "u", "v", "w", "p", "T", "uu", "vv", "ww", "uv", "uw", "vw", "pp", "TT", "rhou", "mut")
 vec16d = wp.types.vector(len(STAT_FIELDS), wp.float64)
+# wall-modeled face samples (float64): wall pressure (first cell), modeled traction, heat flux
+WALL_FIELDS = ("p", "tw_x", "tw_y", "tw_z", "q")
+vec5d = wp.types.vector(len(WALL_FIELDS), wp.float64)
 VISC_SUTHERLAND, VISC_POWER, VISC_CONSTANT = 0, 1, 2
 
 
@@ -837,6 +840,43 @@ def make_kernels(prec: Precision):
                      wp.float64(mut[a + ng, b + ng, c + ng]))
         acc[a, b, c] = acc[a, b, c] + smp
 
+    @wp.kernel(module="unique")
+    def k_wall_sample(
+        W: wp.array3d(dtype=vec5),
+        S: wp.array3d(dtype=vec3),
+        axis: int,
+        side: int,
+        ng: int,
+        nc: int,
+        tw: wp.array2d(dtype=vec3),
+        q: wp.array2d(dtype=scalar),
+        p_inf: scalar,
+        accumulate: int,
+        force: wp.array2d(dtype=vec3),
+        acc: wp.array2d(dtype=vec5d),
+    ):
+        """Per wall-modeled face: force exerted by the fluid on the wall (modeled shear plus
+        pressure relative to p_inf, wall pressure = first-cell pressure since the slip-mirror
+        ghost has zero normal pressure gradient) and, if ``accumulate``, float64 sums of
+        WALL_FIELDS."""
+        t1, t2 = wp.tid()
+        fp = ng
+        first = ng
+        sgn = scalar(1.0)
+        if side == 1:
+            fp = ng + nc
+            first = ng + nc - 1
+            sgn = scalar(-1.0)
+        fi = cell(axis, fp, t1 + ng, t2 + ng)
+        Sn = sgn * S[fi[0], fi[1], fi[2]]  # area vector pointing into the fluid (out of the body)
+        ci = cell(axis, first, t1 + ng, t2 + ng)
+        pw = W[ci[0], ci[1], ci[2]][4]
+        t = tw[t1, t2]
+        force[t1, t2] = t * wp.length(Sn) - (pw - p_inf) * Sn
+        if accumulate == 1:
+            acc[t1, t2] = acc[t1, t2] + vec5d(wp.float64(pw), wp.float64(t[0]), wp.float64(t[1]),
+                                              wp.float64(t[2]), wp.float64(q[t1, t2]))
+
     return {
         "Params": Params,
         "mat33": mat33,
@@ -853,4 +893,5 @@ def make_kernels(prec: Precision):
         "add_momentum": k_add_momentum,
         "stats": k_stats,
         "wall_model": k_wall_model,
+        "wall_sample": k_wall_sample,
     }

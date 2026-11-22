@@ -46,6 +46,9 @@ class FlowCfg:
     ref_length: float = 1.0
     alpha: float = 0.0  # angle of attack [deg] (x-y plane)
     beta: float = 0.0  # sideslip [deg]
+    # reference area (nondimensional, units of ref_length^2) for force coefficients in forces.dat;
+    # None -> only the dimensionless forces are written
+    ref_area: float | None = None
 
 
 @dataclass
@@ -139,7 +142,11 @@ class RunCfg:
     stats_every: int = 1
     output_every: int = 0
     stats_start: int = 0
+    # start statistics at this (nondimensional) time instead of a step; takes precedence over
+    # stats_start. Samples are taken on steps that are multiples of stats_every.
+    stats_start_time: float | None = None
     restart_every: int = 0
+    restart_keep: int = 0  # keep only the N most recent periodic restart_*.npz files (0: keep all)
     restart_file: str | None = None
 
 
@@ -308,6 +315,12 @@ def _validate(cfg: CaseConfig) -> None:
     for i, p in enumerate(cfg.periodic):
         if len(p.translation) != 3:
             raise ConfigError(f"periodic[{i}].translation must have 3 components")
+    if cfg.flow.ref_area is not None and cfg.flow.ref_area <= 0:
+        raise ConfigError("flow.ref_area must be positive")
+    if cfg.run.stats_every < 1:
+        raise ConfigError("run.stats_every must be >= 1")
+    if cfg.run.restart_keep < 0:
+        raise ConfigError("run.restart_keep must be >= 0")
     if cfg.grid.extrude is not None and cfg.grid.extrude.nk < 2:
         raise ConfigError("grid.extrude.nk must be >= 2")
 

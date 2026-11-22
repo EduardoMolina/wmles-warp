@@ -39,7 +39,9 @@ from .kernels import (
     WM_EQUILIBRIUM,
     WM_NONE,
     STAT_FIELDS,
+    WALL_FIELDS,
     make_kernels,
+    vec5d,
     vec16d,
 )
 
@@ -86,6 +88,8 @@ class _WMFace:
     q: wp.array  # (n_t1, n_t2) heat flux k dT/dn (n into the fluid)
     ut: wp.array  # (n_t1, n_t2) friction velocity (diagnostic)
     warm: bool = False  # tw holds a previous solution -> warm start
+    force: wp.array | None = None  # (n_t1, n_t2) vec3 force on the wall per face (wall_sample scratch)
+    acc: wp.array | None = None  # (n_t1, n_t2) float64 sums of WALL_FIELDS (statistics)
 
 
 @dataclass
@@ -380,6 +384,33 @@ class Integrator:
                       inputs=[self.s.U[sid], dvec, self.prec.scalar(dm), self.ng], device=d.sub.device)
         self.forcing_history.append((t, dm / dt))
 
+    # ---- wall-modeled faces: forces and surface statistics ----------------------------------
+    def _wall_sample(self, accumulate: bool) -> None:
+        """Launch wall_sample on every wall-modeled face (W must hold the current primitives)."""
+        sc = self.prec.scalar
+        p_inf = sc(self.params.w_inf[4])
+        for sid, d in self.data.items():
+            m = self.s.metrics[sid]
+            S = (m.Si, m.Sj, m.Sk)
+            for (ax, side), f in d.wm.items():
+                if f.force is None:
+                    f.force = wp.zeros(f.tw.shape, dtype=self.prec.vec3, device=d.sub.device)
+                if f.acc is None:
+                    f.acc = wp.zeros(f.tw.shape, dtype=vec5d, device=d.sub.device)
+                wp.launch(self.K["wall_sample"], dim=f.tw.shape,
+                          inputs=[d.W, S[ax], ax, side, self.ng, d.sub.nc[ax], f.tw, f.q, p_inf, int(accumulate)],
+                          outputs=[f.force, f.acc], device=d.sub.device)
+
+    def wall_forces(self) -> np.ndarray:
+        """Total force (3,) exerted by the fluid on all wall-modeled faces: modeled shear (as used
+        in the last step) plus pressure relative to the free-stream pressure."""
+        if not any(d.wm for d in self.data.values()):
+            return np.full(3, np.nan)
+        self.update_primitives()
+        self._wall_sample(accumulate=False)
+        return sum(f.force.numpy().astype(np.float64).reshape(-1, 3).sum(axis=0)
+                   for d in self.data.values() for f in d.wm.values())
+
     # ---- statistics ------------------------------------------------------------------------
     def accumulate_stats(self) -> None:
         self.update_primitives()
@@ -388,6 +419,7 @@ class Integrator:
                 self.stats[sid] = wp.zeros(d.sub.nc, dtype=vec16d, device=d.sub.device)
             wp.launch(self.K["stats"], dim=d.sub.nc, inputs=[d.W, d.mut, self.ng, self.params],
                       outputs=[self.stats[sid]], device=d.sub.device)
+        self._wall_sample(accumulate=True)
         self.stats_count += 1
 
     def stats_mean(self, sid: int) -> dict[str, np.ndarray]:
@@ -395,9 +427,28 @@ class Integrator:
         acc = self.stats[sid].numpy() / max(self.stats_count, 1)
         return {k: acc[..., i] for i, k in enumerate(STAT_FIELDS)}
 
+    def wall_sums(self) -> dict[tuple[int, int, int], np.ndarray]:
+        """(sid, axis, side) -> raw float64 sums (n_t1, n_t2, len(WALL_FIELDS)) of the wall samples."""
+        return {(sid, ax, side): f.acc.numpy().reshape(f.acc.shape + (len(WALL_FIELDS),))
+                for sid, d in self.data.items() for (ax, side), f in d.wm.items() if f.acc is not None}
+
+    def set_stats_sums(self, count: int, cell_sums: dict[int, np.ndarray],
+                       wall_sums: dict[tuple[int, int, int], np.ndarray]) -> None:
+        """Restore accumulated (un-normalized) statistics, e.g. from a restart file."""
+        self.stats_count = int(count)
+        self.stats = {sid: wp.array(np.ascontiguousarray(a, dtype=np.float64), dtype=vec16d,
+                                    device=self.data[sid].sub.device) for sid, a in cell_sums.items()}
+        for (sid, ax, side), a in wall_sums.items():
+            d = self.data[sid]
+            d.wm[(ax, side)].acc = wp.array(np.ascontiguousarray(a, dtype=np.float64), dtype=vec5d,
+                                            device=d.sub.device)
+
     def reset_stats(self) -> None:
         self.stats = {}
         self.stats_count = 0
+        for d in self.data.values():
+            for f in d.wm.values():
+                f.acc = None
 
     def residual_norms(self) -> np.ndarray:
         """RMS of dU/dt (= R/V) over all interior cells, per conservative variable."""

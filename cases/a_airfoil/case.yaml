@@ -1,0 +1,55 @@
+# WMLES of the Aerospatiale A-airfoil near stall: alpha = 13.3 deg, Re_c = 1.0e7, M = 0.15, T_ref = 285 K.
+# Reference WRLES: Tamaki & Kawai, AIAA J. 61(2), 698-711 (2023), doi:10.2514/1.J062066; database (Cp, Cf,
+# profiles, budgets): https://www.klab.mech.tohoku.ac.jp/database/2022TamakiAIAAJ/README.txt
+# Nondimensionalization: chord c, free-stream velocity U_inf (|u_inf| = 1), T_inf = T_ref, so one time unit is
+# one convective time unit, CTU = c / U_inf. Run 30 CTU, average over the last 10 (t = 20..30).
+# Grid (a_airfoil_C.xyz, raw little-endian float64 Plot3D, not in git): 4-block C-mesh, chord 1 with the leading
+# edge at (0, 0) and a sharp trailing edge at (0.99993, -0.01204), far field ~30c, span 0.048c (81 cells).
+#   block 0: lower wake (x = 31 -> TE)   block 1: lower surface (TE -> LE)
+#   block 2: upper surface (LE -> TE)    block 3: upper wake (TE -> x = 31); blocks 0/3 share the wake cut (jmin)
+#   704x112x82 + 1327x112x82 + 1354x112x82 + 704x112x82 nodes = 36.7M cells; first wall cell 2.8e-4c (y+ ~ 100),
+#   wall-tangential spacing 6.0e-4..8.4e-4c, wall-normal growth 1.08.
+# alpha is measured from the grid x axis (the frame of the A-airfoil coordinates, chord line at -0.69 deg).
+# Cost: CFL dt ~ 1.4e-5 (acoustic limit at M = 0.15) -> ~70k steps per CTU, ~2.1M steps in total.
+grid:
+  file: a_airfoil_C.xyz
+  format: plot3d
+
+flow:
+  mach: 0.15
+  reynolds: 1.0e+7      # Re_c = U_inf c / nu_inf (YAML needs the signed exponent to parse a float)
+  temperature: 285.0    # free-stream temperature [K]
+  ref_length: 1.0       # c (grid already in chords)
+  alpha: 13.3
+  ref_area: 0.048       # chord x span, for CL/CD in out/forces.dat
+
+gas: {gamma: 1.4, prandtl: 0.72, prandtl_t: 0.9, viscosity: sutherland}
+
+numerics: {precision: float32, flux: keep_pe, sensor: ducros_pressure, dissipation: roe, cfl: 0.8, rk: ssprk3}
+
+sgs: {model: vreman}
+
+wall_model:
+  type: equilibrium_ode
+  exchange: {cell_index: 3}   # h ~ 7.4e-4c
+  n_points: 40
+
+boundaries:
+  - {faces: [jmin], block: [1, 2], type: wall_modeled, thermal: adiabatic}
+  - {faces: [jmax], type: farfield}             # outer C boundary and y = +-30c
+  - {faces: [imin], block: 0, type: farfield}   # wake exit, x = 31c
+  - {faces: [imax], block: 3, type: farfield}
+
+periodic:
+  - {faces: [kmin, kmax], translation: [0.0, 0.0, 0.048]}
+
+init: {type: freestream}
+
+# One CTU is ~70k steps (~10 h on one A10G). Statistics every 10 steps from t = 20 (~70k samples). Restarts
+# every ~0.5 CTU carry the statistics sums; only the 3 most recent are kept (~1.5 GB each, ~6 GB once averaging).
+run: {t_end: 30.0, stats_start_time: 20.0, stats_every: 10, output_every: 350000, restart_every: 35000,
+      restart_keep: 3, log_every: 1000}
+
+parallel: {devices: auto, partitions: auto}
+
+output: {dir: out, fields: [rho, u, v, w, p, T, mach], format: vtm}

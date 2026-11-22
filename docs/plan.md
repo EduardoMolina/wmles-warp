@@ -153,11 +153,26 @@ Setup: UMD ar2 grid, 64×32×48 cells; exchange point at cell 3; M = 0.2; 60,000
 
 Both runs show the log-layer mismatch typical of coarse grids. The outer region matches the DNS.
 
+**GPU sweep** (1× A10G, float32, 200,000 steps, statistics from step 50,000; about 70 Mcell-steps/s
+on the ar1 grid):
+
+| Case | u_τ error vs DNS |
+|---|---|
+| ar2, equilibrium, cell 3 | −2.2% (float64 CPU: −1.9%, so float32/GPU agrees) |
+| ar1, equilibrium, cells 1 / 2 / 3 / 4 / 5 | −15.9% / −8.0% / −3.9% / −1.4% / −0.04% |
+| ar1, algebraic, cell 3 | −6.1% |
+
+- The exchange location dominates the error (log-layer mismatch). Cells 4–5 (h ≈ 0.10–0.13,
+  h⁺ ≈ 510–700, i.e. h ≈ 0.1δ) are within 1.5% of the DNS.
+- The finer streamwise grid (ar1) costs about 2 points for both models at cell 3, a resolution
+  effect rather than a model effect.
+- Plot: `verification/results/channel_re5200_exchange_sensitivity.png`.
+
 **Remaining**
 1. **Channel at Re_τ = 5200:**
-   - ar1 grid (129×33×49) and the other UMD resolutions;
-   - sensitivity to the exchange location (cell 1 vs 2–5);
-   - a float32 run on the GPU.
+   - the other UMD resolutions;
+   - mean and stress profiles of the ar1 sweep (bring back `stats.npz`);
+   - decide the default exchange location (currently cell 3).
 2. **Compressible wall-model check:** high-Re supersonic channel (Modesti & Pirozzoli 2016) or a
    heated isothermal-wall case. This validates the energy equation and q_w in the solver.
 3. **Zero-pressure-gradient turbulent boundary layer** with recycling/rescaling or synthetic inflow:

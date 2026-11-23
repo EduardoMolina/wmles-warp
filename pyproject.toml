@@ -9,6 +9,9 @@ description = "Compressible wall-modeled LES solver (multiblock explicit FV) in 
 requires-python = ">=3.10"
 dependencies = ["warp-lang", "numpy", "pyvista", "pyyaml"]
 
+[project.optional-dependencies]
+cgns = ["h5py"]
+
 [project.scripts]
 wmles = "wmles_wrap.cli:main"
 

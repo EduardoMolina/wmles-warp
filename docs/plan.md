@@ -19,18 +19,20 @@ transonic buffet on the NASA Common Research Model (CRM).
 | 2 | SGS and compressible turbulence | done on CPU; converged runs need the GPU node | `c1e232e` |
 | 3 | Wall-model validation | in progress: models and channel at Re_τ = 5200 done; A-airfoil set up | `main` `3077414` |
 | 4 | CGNS, OAT15A buffet, CRM | not started | — |
+| R | RANS-SA (steady RANS, URANS, DDES, adjoint target) | planned, see [plan_rans.md](plan_rans.md) | — |
 
 ## Environment and design drivers
 
 **Development machine**
 - macOS ARM with the conda env `pyvista`: Python 3.14, Warp 1.19 (CPU-only build), PyVista,
-  PyYAML, SciPy, pytest and `plot3d`.
-- No mpi4py, h5py or CUDA.
+  PyYAML, SciPy, pytest, `plot3d` and `h5py` (CGNS/HDF5 input).
+- No mpi4py or CUDA.
 - Verification runs here in float64. `parallel.partitions: N` exercises the same decomposition and
   halo code that the multi-GPU runs use.
 
 **Production machine**
 - AWS g6e.48xlarge with 8× L40S (48 GB each, PCIe Gen4, no NVLink).
+- AWS g5 instances with A10G (24 GB, 600 GB/s) for single-GPU and smaller runs.
 - FP64 runs at about 1/64 of FP32 speed, so production uses `numerics.precision: float32`.
 - Statistics accumulators stay in float64.
 
@@ -230,8 +232,12 @@ questions from the shock/buffet dynamics of the OAT15A.
 
 ## Phase 4 (roadmap): buffet and CRM
 
-- **CGNS reader:** needs `h5py` in the `pyvista` env. It must read 1-to-1 abutting connectivity
-  from `ZoneGridConnectivity` and support symmetry-plane and far-field boundaries.
+- **CGNS reader** (`h5py` is installed in the `pyvista` env; shared with RANS stage R0 in
+  [plan_rans.md](plan_rans.md)):
+  - Targets structured CGNS/HDF5 exports from ICEM and ANSA.
+  - Reads 1-to-1 abutting connectivity from `ZoneGridConnectivity` and boundaries from `ZoneBC`.
+  - Splits blocks at sub-face boundaries, so all interfaces are full-face.
+  - Supports symmetry-plane and far-field boundaries.
 - **Async halo exchange** (streams/events), plus probes and surface/wall-pressure output for
   spectra.
 - **Intermediate buffet case: OAT15A airfoil** (M = 0.73, Re_c = 3×10⁶, α ≈ 3.5°) as a

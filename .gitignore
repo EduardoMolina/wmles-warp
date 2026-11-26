@@ -14,3 +14,4 @@ cases/a_airfoil/*.p3d
 cases/a_airfoil/case_coarse.yaml
 cases/a_airfoil/out*/
 cases/tmr/**/*.p3dfmt
+cases/tmr/**/*.cgns

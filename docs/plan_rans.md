@@ -378,7 +378,8 @@ fixed-point structure as the primal, in mixed precision:
 
 The NASA Turbulence Modeling Resource (TMR) and DPW grids are downloaded by the user. The TMR grids
 are formatted Plot3D, 3D with two planes in i (one cell thick), plus a neutral map file (`.nmf`)
-with the BCs. Grid files (`*.p3dfmt`) are git-ignored. The `.nmf` files and the SA reference data
+with the BCs. The same families are also there as structured CGNS (`*.cgns`), which serve as the
+test input for the R0 CGNS reader. Grid files (`*.p3dfmt`, `*.cgns`) are git-ignored. The `.nmf` files and the SA reference data
 (`*.dat`) are committed.
 
 | Case | Directory | Grid sizes (downloaded) | Reference data |

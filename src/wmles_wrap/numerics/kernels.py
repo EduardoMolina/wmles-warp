@@ -72,6 +72,7 @@ def make_kernels(prec: Precision):
     # Inside a kernel, Python float literals are float32: scalar(2.0 / 3.0) there computes
     # 2/3 in float32 and then converts, silently losing precision in float64 kernels.
     tiny = scalar(1e-30)
+    smooth_bc = scalar(0.05)  # width (in u_n / a) of the smooth far-field inflow/outflow blend
 
     @wp.struct
     class Params:
@@ -102,6 +103,10 @@ def make_kernels(prec: Precision):
         wm_r: scalar
         wm_iters: int
         wm_iters_warm: int
+        flux_type: int  # 0: KEEP-PE + sensor-weighted dissipation (LES), 1: Roe-MUSCL (steady RANS)
+        muscl_e: vec5  # van Albada regularization (eps * reference)^2 per primitive variable
+        fix_linear: scalar  # Harten entropy fix on the entropy/shear waves (fraction of a), Roe-MUSCL
+        steady: int  # 1: steady solver (solver.mode rans): smooth far-field inflow/outflow switch
 
     # ---- thermodynamics -----------------------------------------------------------------
     @wp.func
@@ -180,6 +185,28 @@ def make_kernels(prec: Precision):
         return l
 
     @wp.func
+    def euler_flux(W: vec5, S: vec3, p: Params) -> vec5:
+        u = velocity(W)
+        un = wp.dot(u, S)
+        rho_un = W[0] * un
+        m = rho_un * u + W[4] * S
+        H = p.gamma / (p.gamma - one) * W[4] / W[0] + half * wp.dot(u, u)
+        return vec5(rho_un, m[0], m[1], m[2], rho_un * H)
+
+    @wp.func
+    def van_albada(a: scalar, b: scalar, e: scalar) -> scalar:
+        """Smooth limited slope (van Albada); unlimited average for |a|, |b| << sqrt(e)."""
+        return (a * (b * b + e) + b * (a * a + e)) / (a * a + b * b + two * e)
+
+    @wp.func
+    def muscl(Wm: vec5, W0: vec5, Wp: vec5, sgn: scalar, p: Params) -> vec5:
+        """Face state of cell W0 towards its neighbour Wp (sgn = +1) or Wm (sgn = -1)."""
+        out = vec5()
+        for k in range(5):
+            out[k] = W0[k] + sgn * half * van_albada(W0[k] - Wm[k], Wp[k] - W0[k], p.muscl_e[k])
+        return out
+
+    @wp.func
     def roe_dissipation(WL: vec5, WR: vec5, S: vec3, p: Params) -> vec5:
         """|A_n| (U_R - U_L) |S| with Roe averages (Toro, ch. 11)."""
         area = wp.length(S)
@@ -205,6 +232,8 @@ def make_kernels(prec: Precision):
         delta = p.entropy_fix * at
         l1 = harten(unt - at, delta)
         l2 = wp.abs(unt)
+        if p.flux_type == 1 and p.fix_linear > zero:
+            l2 = harten(unt, p.fix_linear * at)
         l5 = harten(unt + at, delta)
         a1 = (dp - rt * at * dun) / (two * at2)
         a5 = (dp + rt * at * dun) / (two * at2)
@@ -284,9 +313,17 @@ def make_kernels(prec: Precision):
                 u_ref = u_o
                 un_ref = un_o
             s = ref[4] / wp.pow(ref[0], p.gamma)
+            ut_ref = u_ref - un_ref * nrm
+            if p.steady == 1:
+                # steady solver: blend inflow/outflow smoothly in u_n (the switch at u_n = 0, e.g. on a
+                # far field parallel to the flow, makes the residual non-smooth and stalls the
+                # implicit iteration)
+                wgt = half * (one + wp.tanh(un_b / (smooth_bc * a_b)))
+                s = wgt * (W1[4] / wp.pow(W1[0], p.gamma)) + (one - wgt) * (p.w_inf[4] / wp.pow(p.w_inf[0], p.gamma))
+                ut_ref = wgt * (u_i - un_i * nrm) + (one - wgt) * (u_o - un_o * nrm)
             rho_b = wp.pow(a_b * a_b / (p.gamma * s), one / g1)
             p_b = rho_b * a_b * a_b / p.gamma
-            u_b = u_ref + (un_b - un_ref) * nrm
+            u_b = ut_ref + un_b * nrm
             Wb = vec5(rho_b, u_b[0], u_b[1], u_b[2], p_b)
         elif bctype == 5:  # subsonic inflow: rho, u from free stream, p extrapolated
             Wb = vec5(p.w_inf[0], p.w_inf[1], p.w_inf[2], p.w_inf[3], W1[4])
@@ -482,9 +519,26 @@ def make_kernels(prec: Precision):
         WL = W[iL, jL, kL]
         WR = W[iR, jR, kR]
         Sf = S[iR, jR, kR]
-        flux = keep_pe_flux(WL, WR, Sf, p)
+        wall_face = (fa == 0 and nodiss_lo == 1) or (fa == nfaces - 1 and nodiss_hi == 1)
+        flux = vec5()
+        if p.flux_type == 1:
+            # Roe-MUSCL: van Albada primitive reconstruction from two cells per side; on wall/slip
+            # faces first-order mirrored states and no dissipation (pressure flux only)
+            if wall_face:
+                flux = half * (euler_flux(WL, Sf, p) + euler_flux(WR, Sf, p))
+            else:
+                WLL = W[2 * iL - iR, 2 * jL - jR, 2 * kL - kR]
+                WRR = W[2 * iR - iL, 2 * jR - jL, 2 * kR - kL]
+                QL = muscl(WLL, WL, WR, one, p)
+                QR = muscl(WL, WR, WRR, -one, p)
+                if QL[0] <= zero or QL[4] <= zero or QR[0] <= zero or QR[4] <= zero:
+                    QL = WL
+                    QR = WR
+                flux = half * (euler_flux(QL, Sf, p) + euler_flux(QR, Sf, p)) - half * roe_dissipation(QL, QR, Sf, p)
+        else:
+            flux = keep_pe_flux(WL, WR, Sf, p)
 
-        if p.diss_type > 0:
+        if p.diss_type > 0 and p.flux_type == 0:
             phi = one
             if p.use_sensor > 0:
                 phi = wp.max(th[iL, jL, kL], th[iR, jR, kR])
@@ -515,7 +569,7 @@ def make_kernels(prec: Precision):
             uf = half * (uL + uR)
             mu = viscosity(Tf, p)
             mt = half * (mut[iL, jL, kL] + mut[iR, jR, kR])
-            if (fa == 0 and nodiss_lo == 1) or (fa == nfaces - 1 and nodiss_hi == 1):
+            if wall_face:
                 mt = zero  # no eddy viscosity on wall/slip faces (ghost values are mirrors)
             mue = mu + mt
             kappa = p.cp * (mu / p.prandtl + mt / p.prandtl_t)

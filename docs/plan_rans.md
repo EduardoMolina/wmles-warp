@@ -21,7 +21,7 @@ LES roadmap is in [plan.md](plan.md), and code conventions are in [CLAUDE.md](..
 |---|---|---|
 | R0 | Prerequisites: grid input (CGNS, NMF, formatted Plot3D), FP64 metrics, GPU wall distance, line-aware partitioner, mixed-precision kernels | done (branch `rans-r0`) |
 | R1 | Pseudo-time implicit core (mixed-precision defect correction, line relaxation) | done (laminar; branch `rans-r0`) |
-| R2 | Dissipative steady residual, then the SA model (negative-SA) | not started |
+| R2 | Dissipative steady residual, then the SA model (negative-SA) | done (branch `rans-r2`) |
 | R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | not started; 2DZP/2DCJ/2DB grids and SA data in `cases/tmr/` |
 | R4 | Acceleration: FGMRES and/or FAS multigrid | not started |
 | R5 | Production steady RANS: NASA CRM (DPW-5/6) | not started |
@@ -177,7 +177,7 @@ one backward-Euler pseudo-time step, (V/Δτ − ∂R/∂Q) δQ = R, approximate
 - **Approximate Jacobian (FP32 by default, `rans.solve_precision`):**
   - Inviscid: ½A(Q_j, S) per face (exact Euler flux Jacobian); the cell's own central terms
     cancel by the GCL.
-  - Dissipation: Rusanov (default) or Roe (`rans.jacobian`), scaled by
+  - Dissipation: Rusanov or Roe (`rans.jacobian`; R2 made `auto` the default: Roe for a Roe residual), scaled by
     `rans.implicit_dissipation`.
   - Viscous: thin-layer, linear in V = (ρ, u, T): K_f = |S|²/V_f [μ(I + nnᵀ/3) on u, κ on T, work
     term], so K ∂V/∂U couples the energy equation to ρ and ρu through T. A scalar viscous
@@ -210,29 +210,54 @@ one backward-Euler pseudo-time step, (V/Δτ − ∂R/∂Q) δQ = R, approximate
     implicit dissipation that stability needs damps modes the residual does not, and steady
     convergence is slow (plate: 5×10⁻⁷ after 400 iterations). A Roe residual with the Rusanov
     operator converges at ~0.98 per iteration.
-  - The Roe operator matches the Roe residual closely but limit-cycles near 10⁻⁷: the
-    residual's |u·n| has a kink at u·n = 0, exactly where faces along walls sit.
+  - The Roe operator matched the Roe residual closely but limit-cycled near 10⁻⁷. Attributed
+    here to the |u·n| kink; R2 found the cause in the far-field BC switching at u_n = 0.
   - Hence the dissipative, smooth steady residual added to R2 below.
 - Not done yet: GPU timing and memory per cell, implicit far-field/inflow/outflow BCs.
 
-### R2: dissipative steady residual, then the SA model (`physics/sa.py` plus kernels)
+### R2: dissipative steady residual, then the SA model (`numerics/sa.py`) — done
 
-- **Steady RANS residual first** (R1 finding): the LES residual is central with
-  sensor-weighted dissipation, which the implicit solver converges slowly. RANS needs a
-  second-order upwind residual: Roe with MUSCL reconstruction (smooth limiter, e.g. van Albada or
-  Venkatakrishnan) or JST-type scalar dissipation. Its entropy fix must be smooth on all waves
-  (no |u·n| kink), so the Roe operator converges to machine zero, and its limiter
-  differentiable for the adjoint (design rule 4). Selected by the mode, so the LES residual stays
-  unchanged. Verify: laminar flat plate against Blasius (C_f = 0.664/√Re_x) to machine zero.
-- Negative-SA (Allmaras, Johnson & Spalart 2012) for robustness.
-- First-order upwind convection for ν̃.
-- Segregated scalar tridiagonal line solve for ν̃, run right after the mean flow.
-- μ_t feeds the existing viscous flux.
-- Verify:
-  - NASA TMR SA manufactured solution (MMS).
-  - TMR 2D zero-pressure-gradient flat plate (2DZP): Cf and grid convergence (see R3).
+- **Steady residual** `numerics.flux: roe_muscl`: van Albada primitive MUSCL (smooth;
+  `numerics.muscl_eps` relative to free-stream scales) and Roe flux; first-order mirrored states and
+  no dissipation on wall/slip faces; first-order fallback if a reconstructed ρ or p is not
+  positive. The LES residual (`keep_pe`) is bitwise unchanged. Optional Harten fix on the
+  entropy/shear waves (`numerics.entropy_fix_linear`, default 0: 0.05 raised C_f by 5–20 %).
+- **Negative SA** (Allmaras, Johnson & Spalart 2012, with f_t2, no trip; `rans.turbulence: sa`):
+  ν̃ is a separate padded scalar (`Solver.turbulence.nut`) with its own ghosts (wall −ν̃, slip +ν̃,
+  far field ν̃∞ inflow / extrapolation outflow) and halo exchange; μ_t = ρν̃f_v1 replaces the SGS
+  viscosity in `Integrator.rhs`; first-order upwind convection, diffusion
+  ∇·((ν + ν̃f_n + c_b2ν̃)∇ν̃) − c_b2ν̃∇²ν̃, vorticity and the GPU wall distance in the source.
+  ν̃∞ = 3ν∞ (`rans.nut_inf_ratio`). Restart files and output fields `nut`, `mut` include it.
+- **Segregated implicit step for ν̃** after the mean flow: scalar line solves (same zebra
+  colouring), upwind convection, frozen-coefficient diffusion, and the positive part of the full
+  d(D − P)/dν̃ by a float64 finite difference. The simplified 2c_w1f_wν̃/d² misses the f_w(r(ν̃))
+  term (more than half near walls) and the iteration oscillated at high CFL.
+- **Convergence findings** (each was a stall on the TMR plate; tests and README record them):
+  - The far-field Riemann BC switched its entropy/tangential reference state at u_n = 0, which is
+    exactly the top boundary of a flat plate. In `solver.mode: rans` the switch is blended
+    smoothly (tanh over 0.05 a), for the mean flow and ν̃. This, not the |u·n| kink, caused the
+    Roe-operator stalls recorded in R1.
+  - Operator dissipation must match the residual's: the Roe operator now floors the acoustic
+    waves at 0.2a (`rans.jacobian_entropy_fix`) and the entropy/shear waves at 0.05a
+    (`..._linear`); a 0.2a floor on all waves over-damps the shear waves near walls and converges
+    very slowly at high Re. `rans.jacobian: auto` picks Roe for a Roe residual.
+  - Second-order residuals respond more strongly than the first-order operator in some modes;
+    exact linear solves then overshoot. `rans.implicit_dissipation: 1.25` (default) fixes it.
+  - Fine grids need more linear sweeps: adaptive, until max|δQ_new − δQ_old| ≤ 0.02 max|δQ|
+    (`rans.sweep_tolerance`, max norms so the count is partition-independent), 4–32 sweeps.
+- **Verification** ([verification/README.md](../verification/README.md)):
+  - Steady MMS with SA (`verification/sa_mms.py`): mean flow order 2.1–2.5, ν̃ 0.96.
+  - Laminar plate vs Blasius: 1.3 % on the 137×97 grid.
+  - TMR 2DZP SA (`verification/sa_flatplate.py`): converged to 1e-10 on all four grids
+    (503/219/183/167 iterations); C_f(0.97) 2.7846e-3 on 35×25 vs CFL3D 2.7957e-3 and FUN3D
+    2.6674e-3; second-order grid convergence to ~2.723e-3, 0.65 % above the TMR fine-grid value.
+    The TMR inflow/outflow BCs are open for R3.
 
 ### R3: TMR verification
+
+First, from R2: the TMR total-pressure/total-temperature inflow and back-pressure outflow BCs
+(the 2DZP results are 0.65 % above TMR with the simplified inflow/outflow), and a second-order
+wall-shear evaluation.
 
 These three NASA TMR verification cases are the turbulence-model verification set. Each is
 compared with the CFL3D/FUN3D SA results on the same grid family, using the grid-convergence plots

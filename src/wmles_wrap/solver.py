@@ -127,7 +127,12 @@ class Solver:
         self._wall_distance: WallDistance | None = None
         self.U = {s.id: self._alloc_state(s) for s in self.subs}
         self.init_freestream()
+        self.turbulence = None
         self.integrator = Integrator(self)
+        if cfg.solver.mode == "rans" and cfg.rans.turbulence == "sa":
+            from .numerics.sa import SAModel
+
+            self.turbulence = SAModel(self)
         if cfg.init.type == "channel":
             self.init_channel()
         self.setup_time = _time.perf_counter() - t0
@@ -439,6 +444,20 @@ class Solver:
             self._wall_distance = compute_wall_distance(self.subs, self.parent_blocks, self.prec, self.ng)
         return self._wall_distance
 
+    def set_wall_distance(self, fn) -> None:
+        """Replace the wall distance by ``fn(x) -> d`` at the padded cell centroids (verification,
+        e.g. manufactured solutions without walls)."""
+        from .grid.wall_distance import WallDistance, WallSurface
+
+        d, face = {}, {}
+        for sb in self.subs:
+            xc = self.metrics[sb.id].xc.numpy().astype(np.float64)
+            d[sb.id] = wp.array(np.asarray(fn(xc)).astype(self.prec.np_dtype), dtype=self.prec.scalar,
+                                device=sb.device)
+            face[sb.id] = wp.full(xc.shape[:3], -1, dtype=wp.int32, device=sb.device)
+        self._wall_distance = WallDistance(face, d, WallSurface(np.zeros((0, 3)), np.zeros((0, 3), np.int32),
+                                                                np.zeros(3)))
+
     def write_output(self, writer: SnapshotWriter | None = None) -> Path:
         writer = writer or SnapshotWriter(self.out_dir)
         blocks = []
@@ -449,6 +468,11 @@ class Solver:
             data["volume"] = self.interior(self.metrics[s.id].vol.numpy()).astype(np.float64)
             if "wall_distance" in fields:
                 data["wall_distance"] = self.interior(self.wall_distance().d[s.id].numpy()).astype(np.float64)
+            if self.turbulence is not None:
+                if "nut" in fields:
+                    data["nut"] = self.interior(self.turbulence.nut[s.id].numpy()).astype(np.float64)
+                if "mut" in fields:
+                    data["mut"] = self.interior(self.integrator.data[s.id].mut.numpy()).astype(np.float64)
             blocks.append((f"block{s.parent}_part{s.id}", s.x, data))
         return writer.write(self.step, self.time, blocks)
 
@@ -470,6 +494,8 @@ class Solver:
             extra["stats_count"] = I.stats_count
             extra.update({f"stats{b:04d}": a for b, a in enumerate(self._parent_stats_sums())})
             extra.update({f"wallsum{b:04d}_{FACE_NAMES[f]}": a for (b, f), a in self._parent_wall_sums().items()})
+        if self.turbulence is not None:
+            extra.update({f"nut{b:04d}": a for b, a in enumerate(self.turbulence.parent_nut())})
         write_restart(path, self.step, self.time, self.parent_states(), self.prec.name, extra)
 
     def read_restart(self, path: str | Path) -> None:
@@ -477,6 +503,8 @@ class Solver:
 
         self.step, self.time, states, extra = read_restart(path, with_extra=True)
         self.load_parent_states(states)
+        if self.turbulence is not None and "nut0000" in extra:
+            self.turbulence.load_parent_nut([extra[f"nut{b:04d}"] for b in range(len(states))])
         for d in self.integrator.data.values():
             s = d.sub
             for (ax, side), f in d.wm.items():
@@ -531,7 +559,10 @@ class Solver:
             lines.append(f"line axes        : {['ijk'[a] for a in self.line_axes]} (kept whole by the partitioner)")
         if self.cfg.solver.mode == "rans":
             r = self.cfg.rans
-            lines.append(f"steady solver    : {r.smoother}, {r.sweeps} sweeps, {r.jacobian} Jacobian x {r.implicit_dissipation}, "
+            from .numerics.implicit import jacobian_type
+
+            lines.append(f"steady solver    : {r.smoother}, {r.sweeps} sweeps, {jacobian_type(self.cfg)} Jacobian "
+                         f"x {r.implicit_dissipation} (floor {r.jacobian_entropy_fix:g}), turbulence {r.turbulence}, "
                          f"residual {self.prec.name} / solve {r.solve_precision}, CFL {r.cfl_start:g} -> {r.cfl_max:g}")
         nper = sum(1 for i in self.interfaces if i.periodic)
         lines.append(f"block interfaces : {len(self.interfaces)} one-sided ({nper} periodic)")

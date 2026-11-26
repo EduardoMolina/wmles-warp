@@ -69,7 +69,9 @@ class GasCfg:
 @dataclass
 class NumericsCfg:
     precision: str = "float64"
-    flux: str = "keep_pe"
+    flux: str = "keep_pe"  # keep_pe (LES: + sensor-weighted dissipation) | roe_muscl (steady RANS)
+    muscl_eps: float = 1.0e-3  # roe_muscl: van Albada regularization, relative to free-stream scales
+    entropy_fix_linear: float = 0.0  # roe_muscl: Harten fix on the entropy/shear waves (fraction of a)
     sensor: str = "ducros_pressure"  # ducros_pressure | ducros | none
     dissipation: str = "roe"
     cfl: float = 0.8
@@ -187,9 +189,14 @@ class SolverCfg:
 class RansCfg:
     """Steady implicit solver (solver.mode: rans). The residual precision is numerics.precision."""
 
-    turbulence: str = "none"  # none: laminar (SA comes with R2)
+    turbulence: str = "none"  # none: laminar | sa: negative Spalart-Allmaras (numerics/sa.py)
+    nut_inf_ratio: float = 3.0  # free-stream nu tilde / nu (NASA TMR: 3)
     smoother: str = "zebra"  # zebra (red-black line Gauss-Seidel) | line_jacobi
-    sweeps: int = 8  # linear sweeps per outer iteration
+    # linear sweeps per outer iteration: stop when max|dQ_new - dQ_old| <= sweep_tolerance max|dQ|
+    # (max norms: independent of the partitioning), after min_sweeps and at most sweeps
+    sweeps: int = 32
+    min_sweeps: int = 4
+    sweep_tolerance: float = 0.02
     solve_precision: str = "float32"  # precision of the linear relaxation (Jacobian blocks, dQ)
     cfl_start: float = 5.0
     cfl_max: float = 1.0e4
@@ -199,8 +206,14 @@ class RansCfg:
     relax_limit: float = 0.5  # largest relative density/pressure change per cell and iteration
     # dissipation in the implicit operator and its scale (1 = as in a fully upwind residual); roe
     # matches a Roe residual more closely but can limit-cycle (numerics/implicit.py)
-    jacobian: str = "rusanov"  # rusanov | roe
-    implicit_dissipation: float = 1.0
+    # auto: roe when the residual's dissipation is Roe (flux roe_muscl, or keep_pe with dissipation
+    # roe), else rusanov; the operator must not be less dissipative than the residual
+    jacobian: str = "auto"  # auto | rusanov | roe
+    implicit_dissipation: float = 1.25  # > 1: second-order residuals respond more strongly than the first-order operator
+    # roe Jacobian only (the residual is not affected): Harten floors |lambda| >= fix * a of the
+    # acoustic waves and of the entropy/shear waves
+    jacobian_entropy_fix: float = 0.2
+    jacobian_entropy_fix_linear: float = 0.05
 
 
 @dataclass
@@ -336,7 +349,9 @@ def _validate(cfg: CaseConfig) -> None:
     if cfg.grid.extrude is not None and (cfg.grid.nmf is not None or cfg.grid.format == "cgns"):
         raise ConfigError("grid.extrude cannot be combined with patch information (grid.nmf or cgns)")
     choice(cfg.numerics.precision, ("float32", "float64"), "numerics.precision")
-    choice(cfg.numerics.flux, ("keep_pe",), "numerics.flux")
+    choice(cfg.numerics.flux, ("keep_pe", "roe_muscl"), "numerics.flux")
+    if cfg.numerics.muscl_eps <= 0 or cfg.numerics.entropy_fix_linear < 0:
+        raise ConfigError("numerics.muscl_eps must be > 0 and numerics.entropy_fix_linear >= 0")
     choice(cfg.numerics.sensor, ("ducros_pressure", "ducros", "none"), "numerics.sensor")
     choice(cfg.numerics.dissipation, ("roe", "rusanov", "none"), "numerics.dissipation")
     choice(cfg.numerics.rk, ("ssprk3",), "numerics.rk")
@@ -369,18 +384,26 @@ def _validate(cfg: CaseConfig) -> None:
         if len(p.translation) != 3:
             raise ConfigError(f"periodic[{i}].translation must have 3 components")
     choice(cfg.solver.mode, ("les", "rans"), "solver.mode")
-    choice(cfg.rans.turbulence, ("none",), "rans.turbulence")
+    choice(cfg.rans.turbulence, ("none", "sa"), "rans.turbulence")
+    if cfg.rans.nut_inf_ratio < 0:
+        raise ConfigError("rans.nut_inf_ratio must be >= 0")
     choice(cfg.rans.smoother, ("zebra", "line_jacobi"), "rans.smoother")
     choice(cfg.rans.solve_precision, ("float32", "float64"), "rans.solve_precision")
-    choice(cfg.rans.jacobian, ("rusanov", "roe"), "rans.jacobian")
-    if cfg.rans.sweeps < 1 or cfg.rans.max_iterations < 0:
-        raise ConfigError("rans.sweeps must be >= 1 and rans.max_iterations >= 0")
+    choice(cfg.rans.jacobian, ("auto", "rusanov", "roe"), "rans.jacobian")
+    if cfg.rans.sweeps < 1 or cfg.rans.max_iterations < 0 or not 1 <= cfg.rans.min_sweeps <= cfg.rans.sweeps:
+        raise ConfigError("rans: need 1 <= min_sweeps <= sweeps and max_iterations >= 0")
+    if cfg.rans.sweep_tolerance < 0:
+        raise ConfigError("rans.sweep_tolerance must be >= 0")
     if not 0 < cfg.rans.cfl_start <= cfg.rans.cfl_max:
         raise ConfigError("rans: need 0 < cfl_start <= cfl_max")
+    if cfg.rans.jacobian_entropy_fix < 0 or cfg.rans.jacobian_entropy_fix_linear < 0:
+        raise ConfigError("rans.jacobian_entropy_fix(_linear) must be >= 0")
     if cfg.rans.implicit_dissipation < 0:
         raise ConfigError("rans.implicit_dissipation must be >= 0")
     if not 0 < cfg.rans.relax_limit < 1:
         raise ConfigError("rans.relax_limit must be in (0, 1)")
+    if cfg.rans.turbulence != "none" and cfg.solver.mode != "rans":
+        raise ConfigError("rans.turbulence needs solver.mode: rans")
     if cfg.solver.mode == "rans":
         if cfg.sgs.model != "none":
             raise ConfigError("solver.mode: rans needs sgs.model: none")

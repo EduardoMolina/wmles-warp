@@ -180,6 +180,14 @@ class Integrator:
         P.wm_r = sc(wm.stretching)
         P.wm_iters = wm.iterations
         P.wm_iters_warm = wm.iterations_warm
+        num = cfg.numerics
+        P.flux_type = {"keep_pe": 0, "roe_muscl": 1}[num.flux]
+        a_inf = float(np.sqrt(gas.gamma * gas.R * T))
+        uref = max(float(np.sqrt(u * u + v * v + w * w)), a_inf)
+        ref = (rho, uref, uref, uref, rho * gas.R * T)
+        P.muscl_e = self.prec.vec5(*((num.muscl_eps * r) ** 2 for r in ref))
+        P.fix_linear = sc(num.entropy_fix_linear)
+        P.steady = 1 if cfg.solver.mode == "rans" else 0
         return P
 
     def _alloc(self, sb: SubBlock) -> _SubData:
@@ -270,8 +278,11 @@ class Integrator:
     def rhs(self, t: float, stage: int = 0) -> None:
         K, ng = self.K, self.ng
         update_wm = stage == 0 or self.s.cfg.wall_model.update == "stage"
+        turb = getattr(self.s, "turbulence", None)
         self.update_primitives()
         self.fill_ghosts(t)
+        if turb is not None:
+            turb.fill_ghosts()
         force = self.prec.vec3(*self.force)
         for sid, d in self.data.items():
             m = self.s.metrics[sid]
@@ -279,7 +290,9 @@ class Integrator:
             pad = d.sub.padded_shape_cells(ng)
             wp.launch(K["gradients"], dim=tuple(n - 2 for n in pad),
                       inputs=[d.W, m.Si, m.Sj, m.Sk, m.vol, self.params], outputs=[d.GU, d.GT, d.th], device=dev)
-            if self.params.sgs_model != SGS_NONE:
+            if turb is not None:
+                turb.eddy_viscosity(sid, d)
+            elif self.params.sgs_model != SGS_NONE:
                 wp.launch(K["sgs"], dim=tuple(n - 2 for n in pad), inputs=[d.W, d.GU, m.vol, self.params],
                           outputs=[d.mut], device=dev)
             if update_wm:

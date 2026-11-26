@@ -55,3 +55,28 @@ At 64³ the curves move toward the DNS, but none has converged: all peak about 1
 | WMLES channel Re_τ = 5200, GPU sweep (1× A10G, float32, 200 000 steps, statistics from step 50 000) | `channel_sweep_1gpu.sh` | ar2 equilibrium cell 3: −2.2% (float64 CPU: −1.9%, so float32/GPU agrees). ar1 equilibrium, exchange cell 1/2/3/4/5 (h = 0.013/0.039/0.067/0.098/0.134, h⁺ = 65/200/346/509/697): **−15.9% / −8.0% / −3.9% / −1.4% / −0.04%**; ar1 algebraic cell 3: −6.1%. The exchange location dominates the error (log-layer mismatch); the finer streamwise grid costs about 2 points for both models at cell 3. About 70 Mcell-steps/s on the ar1 grid. Plot: `results/channel_re5200_exchange_sensitivity.png` |
 | Wall-face diagnostics: force monitor, mean surface samples (p, τ_w, q) assembled across partitions, time-based sampling, statistics and wall-model state carried through a restart onto a different partitioning | `tests/test_wall_stats.py` | force equals a host recomputation to 1e-12; surface means equal the host averages; the restarted run reproduces the uninterrupted statistics to 1e-12 |
 | A-airfoil near stall (α = 13.3°, Re_c = 1e7, M = 0.15), reference WRLES Tamaki & Kawai (AIAA J. 2023) | `cases/a_airfoil/case.yaml`, `cases/a_airfoil/coarsen.py`, `airfoil_surface.py` | set up. CPU smoke test on a 4×2×9-coarsened grid (516 k cells, 6 partitions): connectivity (wake cut, 3 block joins, spanwise periodicity) correct, GCL 1e-16, stable for 3000 steps (0.1 CTU) of the impulsive start, residuals down about 20×. Production run (36.7 M cells, 30 CTU, averaging over the last 10) pending on the GPU node |
+
+## RANS-SA (docs/plan_rans.md stages R0–R2)
+
+| Study | Script / test | Result |
+|---|---|---|
+| Grid input: TMR Plot3D+NMF vs CGNS (ADF), patch splitting, zero-thickness plate | `tests/test_grid_import.py` | identical blocks, cuts, interfaces and walls for 2DZP/2DB/2DCJ |
+| Wall distance: analytic plate/cylinder, brute force, ridge near-ties | `tests/test_wall_distance.py` | ≤ 1e-12 relative (float64); FP32 BVH alone up to 857 % off near a ridge, 7e-9 with the FP64 re-check |
+| Implicit core: Couette to machine zero, approximate Jacobian vs finite differences | `tests/test_implicit.py` | 1e-12 in < 60 iterations, matches the explicit steady state; line blocks within 6–8 % of the FD Jacobian |
+| Steady MMS, Roe-MUSCL + negative SA (μ_t in the mean flow, analytic wall distance), reoriented 2-block grid, 3 partitions | `sa_mms.py` | L2 order, n = 8/16/32: mean flow 2.06–2.50, ν̃ 0.95–0.96 (first-order upwind convection, as designed); each grid converged in ≤ 91 iterations |
+| Laminar flat plate, Re = 1e5 per unit length, TMR 2DZP grids | `tests/test_sa.py::test_blasius` | C_f/C_f,Blasius within 2.6 % (69×49) and 1.3 % (137×97) for 0.1 < x < 1.6; converged to 1e-11 in 164–214 iterations |
+| TMR 2DZP flat plate, SA, M = 0.2, Re = 5e6 | `sa_flatplate.py` | see below |
+
+TMR 2DZP with SA (C_f from the first wall cell, C_D = ½∫₀² C_f dx), each grid converged to a 1e-10 residual drop:
+
+| N cells | iterations | C_f(0.97) | CFL3D | FUN3D | C_D | CFL3D | FUN3D |
+|---|---|---|---|---|---|---|---|
+| 816 | 503 | 2.7846e-3 | 2.7957e-3 | 2.6674e-3 | 2.9550e-3 | 2.9544e-3 | 2.7739e-3 |
+| 3 264 | 219 | 2.7372e-3 | 2.7284e-3 | 2.6950e-3 | 2.9033e-3 | 2.8844e-3 | 2.8226e-3 |
+| 13 056 | 183 | 2.7258e-3 | 2.7112e-3 | 2.7022e-3 | 2.8875e-3 | 2.8662e-3 | 2.8400e-3 |
+| 52 224 | 167 | 2.7236e-3 | 2.7067e-3 | 2.7045e-3 | 2.8823e-3 | 2.8613e-3 | 2.8479e-3 |
+
+Second-order grid convergence, to about 2.723e-3 (C_f) and 2.880e-3 (C_D): 0.65–0.85 % above the TMR
+fine-grid values (2.7055e-3, 2.856e-3), where CFL3D and FUN3D agree to 0.01 %. Open for R3: the TMR
+total-pressure inflow and back-pressure outflow (here simplified inflow/outflow BCs) and the wall-shear
+evaluation.

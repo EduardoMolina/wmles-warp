@@ -17,10 +17,11 @@ area vector S and neighbour j:
                         + sum_{wall/slip f} [1/2 A(Q_g, S) B + K_f (dV/dU(Q_i) - dV/dU(Q_g) B)]
                                                                      (those f not in the sum)
     E_f = eps c_i I (Rusanov, c_i = 1/2 max_{i,j}(|u.S| + a |S|)) or eps/2 |A_roe(S)| (Roe: the
-          residual's Roe average and entropy fix); eps = rans.implicit_dissipation (default 1),
-          rans.jacobian (default rusanov). The Roe operator matches the Roe residual closely but
-          limit-cycles near 1e-7 on the laminar flat plate: the residual's |u.n| is not smooth
-          at u.n = 0, where faces along walls sit; the extra Rusanov dissipation masks the kink.
+          residual's Roe average and entropy fix, all eigenvalues floored at
+          rans.jacobian_entropy_fix * a); eps = rans.implicit_dissipation (default 1),
+          rans.jacobian (auto: Roe for a Roe residual, else Rusanov). Without the eigenvalue floor
+          the Roe operator limit-cycles near 1e-7 on the laminar flat plate (|u.n| ~ 0 on faces
+          along walls); a floor of 0.15-0.3 converges fastest (default 0.2), Rusanov slowest.
     K_f: thin-layer viscous flux F_v = K_f (V_j - V_i) in V = (rho, u, v, w, T):
          |S|^2 / V_f [mu (I + n n^T / 3) on u, kappa on T, work term u_f^T mu (I + n n^T / 3)]
 
@@ -69,6 +70,7 @@ def implicit_kernels(mp: MixedPrecision):
     R = mp.residual
     rs, rv3, rv5 = R.scalar, R.vec3, R.vec5
     s, v3, v5, m55 = mp.solve.scalar, mp.solve.vec3, mp.solve.vec5, mp.solve.mat55
+    v4 = wp.types.vector(4, s)
     Params = make_kernels(R)["Params"]
     _, _, block_inverse, _ = block_kernels(mp.solve)
     zero, one, half, two = s(0.0), s(1.0), s(0.5), s(2.0)
@@ -142,7 +144,7 @@ def implicit_kernels(mp: MixedPrecision):
         return l
 
     @wp.func
-    def roe_absA_vec(WL: v5, WR: v5, S: v3, d: v5, p: Params):
+    def roe_absA_vec(WL: v5, WR: v5, S: v3, d: v5, fix: s, fix_lin: s, p: Params):
         """|A_roe(S)| d: the residual's Roe dissipation (numerics/kernels.py roe_dissipation,
         same Roe average and Harten entropy fix) applied to the primitive increments of d."""
         g = s(p.gamma)
@@ -168,9 +170,11 @@ def implicit_kernels(mp: MixedPrecision):
         dp = g1 * (half * q2 * drho - wp.dot(ut, dm) + d[4])
         unt = wp.dot(ut, n)
         dun = wp.dot(du, n)
-        delta = s(p.entropy_fix) * at
+        delta = wp.max(s(p.entropy_fix), fix) * at
         l1 = harten(unt - at, delta)
         l2 = wp.abs(unt)
+        if fix_lin > zero:
+            l2 = harten(unt, fix_lin * at)
         l5 = harten(unt + at, delta)
         a1 = (dp - rt * at * dun) / (two * at2)
         a5 = (dp + rt * at * dun) / (two * at2)
@@ -183,22 +187,24 @@ def implicit_kernels(mp: MixedPrecision):
         return area * v5(d0, dmo[0], dmo[1], dmo[2], de)
 
     @wp.func
-    def diss_vec(Wi: v5, Wj: v5, S: v3, d: v5, jt: int, eps: s, p: Params):
-        """Implicit dissipation applied to d: eps/2 |A_roe| d (jt = 1) or eps c_i d (Rusanov)."""
+    def diss_vec(Wi: v5, Wj: v5, S: v3, d: v5, jc: v4, p: Params):
+        """Implicit dissipation applied to d, jc = (type, eps, fix, fix_linear): eps/2 |A_roe| d with
+        the acoustic / entropy-shear eigenvalues floored at fix * a / fix_linear * a (type 1), or
+        eps c_i d (Rusanov, type 0)."""
         out = v5()
-        if jt == 1:
-            out = (half * eps) * roe_absA_vec(Wi, Wj, S, d, p)
+        if jc[0] > half:
+            out = (half * jc[1]) * roe_absA_vec(Wi, Wj, S, d, jc[2], jc[3], p)
         else:
-            out = (eps * face_coef(Wi, Wj, S, p)) * d
+            out = (jc[1] * face_coef(Wi, Wj, S, p)) * d
         return out
 
     @wp.func
-    def diss_mat(Wi: v5, Wj: v5, S: v3, jt: int, eps: s, p: Params):
+    def diss_mat(Wi: v5, Wj: v5, S: v3, jc: v4, p: Params):
         M = m55()
         for k in range(5):
             e = v5()
             e[k] = one
-            col = diss_vec(Wi, Wj, S, e, jt, eps, p)
+            col = diss_vec(Wi, Wj, S, e, jc, p)
             for r in range(5):
                 M[r, k] = col[r]
         return M
@@ -247,14 +253,14 @@ def implicit_kernels(mp: MixedPrecision):
         return K
 
     @wp.func
-    def off_mat(Wi: v5, Wj: v5, S: v3, K: m55, jt: int, eps: s, p: Params):
+    def off_mat(Wi: v5, Wj: v5, S: v3, K: m55, jc: v4, p: Params):
         """O = dRes_i/dU_j = 1/2 A(Q_j, S) - (dissipation) - K dV/dU(Q_j)."""
-        return half * jac_mat(Wj, S, s(p.gamma)) - diss_mat(Wi, Wj, S, jt, eps, p) - K * dV_dU(Wj, p)
+        return half * jac_mat(Wj, S, s(p.gamma)) - diss_mat(Wi, Wj, S, jc, p) - K * dV_dU(Wj, p)
 
     @wp.func
-    def off_vec(Wi: v5, Wj: v5, S: v3, K: m55, d: v5, jt: int, eps: s, p: Params):
+    def off_vec(Wi: v5, Wj: v5, S: v3, K: m55, d: v5, jc: v4, p: Params):
         """O d without forming O."""
-        return half * jac_vec(Wj, S, d, s(p.gamma)) - diss_vec(Wi, Wj, S, d, jt, eps, p) - K * (dV_dU(Wj, p) * d)
+        return half * jac_vec(Wj, S, d, s(p.gamma)) - diss_vec(Wi, Wj, S, d, jc, p) - K * (dV_dU(Wj, p) * d)
 
     @wp.func
     def face_S(Si: wp.array3d(dtype=rv3), Sj: wp.array3d(dtype=rv3), Sk: wp.array3d(dtype=rv3),
@@ -350,8 +356,7 @@ def implicit_kernels(mp: MixedPrecision):
         la: int,
         fcode: wp.array(dtype=int),
         p: Params,
-        eps: s,
-        jt: int,
+        jc: v4,
         D: wp.array3d(dtype=m55),
         Lo: wp.array3d(dtype=m55),
         Up: wp.array3d(dtype=m55),
@@ -397,12 +402,12 @@ def implicit_kernels(mp: MixedPrecision):
                     B = mirror(code, S, Wi, Wj, p)
                     Dm = Dm + half * jac_mat(Wj, S, g) * B + K * (dV_dU(Wi, p) - dV_dU(Wj, p) * B)
                 else:
-                    Dm = Dm + diss_mat(Wi, Wj, S, jt, eps, p) + K * dV_dU(Wi, p)
+                    Dm = Dm + diss_mat(Wi, Wj, S, jc, p) + K * dV_dU(Wi, p)
                     if a == la and inside:
                         if side == 0:
-                            lo_b = off_mat(Wi, Wj, S, K, jt, eps, p)
+                            lo_b = off_mat(Wi, Wj, S, K, jc, p)
                         else:
-                            up_b = off_mat(Wi, Wj, S, K, jt, eps, p)
+                            up_b = off_mat(Wi, Wj, S, K, jc, p)
         D[idx[0], idx[1], idx[2]] = Dm + dsc * wp.identity(n=5, dtype=s)
         Lo[idx[0], idx[1], idx[2]] = lo_b
         Up[idx[0], idx[1], idx[2]] = up_b
@@ -420,8 +425,7 @@ def implicit_kernels(mp: MixedPrecision):
         la: int,
         fcode: wp.array(dtype=int),
         p: Params,
-        eps: s,
-        jt: int,
+        jc: v4,
         D: wp.array3d(dtype=m55),
         Lo: wp.array3d(dtype=m55),
         Up: wp.array3d(dtype=m55),
@@ -463,7 +467,7 @@ def implicit_kernels(mp: MixedPrecision):
                         Vj = s(vol[nb[0], nb[1], nb[2]])
                         mf = half * s(mut[idx[0], idx[1], idx[2]] + mut[nb[0], nb[1], nb[2]])
                         K = visc_K(Wi, Wj, S, Vi, Vj, mf, p)
-                        r = r - off_vec(Wi, Wj, S, K, dq_in[nb[0], nb[1], nb[2]], jt, eps, p)
+                        r = r - off_vec(Wi, Wj, S, K, dq_in[nb[0], nb[1], nb[2]], jc, p)
             L = Lo[idx[0], idx[1], idx[2]]
             Dc = D[idx[0], idx[1], idx[2]]
             if c > 0:
@@ -509,12 +513,56 @@ def implicit_kernels(mp: MixedPrecision):
     return k_assemble, k_line, k_update
 
 
+def sweep_converged(pairs, ng: int, tol: float) -> bool:
+    """max|new - old| <= tol max|new| over all interior cells (max norms do not depend on the
+    summation order, so the sweep count is the same for every partitioning)."""
+    num = den = 0.0
+    for new, old in pairs:
+        a = new.numpy()[ng:-ng, ng:-ng, ng:-ng]
+        b = old.numpy()[ng:-ng, ng:-ng, ng:-ng]
+        num = max(num, float(np.abs(a - b).max()))
+        den = max(den, float(np.abs(a).max()))
+    return num <= tol * den
+
+
+def jacobian_type(cfg) -> str:
+    """rans.jacobian with auto resolved: roe for a Roe residual, else rusanov."""
+    if cfg.rans.jacobian != "auto":
+        return cfg.rans.jacobian
+    num = cfg.numerics
+    return "roe" if num.flux == "roe_muscl" or num.dissipation == "roe" else "rusanov"
+
+
 @dataclass
-class _Lines:
+class LineLayout:
     la: int  # line axis
     dims: tuple  # (n1, n2) interior cells of the off-line axes
     offset: int  # parity offset: parent index of the first line's off-line coordinates
     fcode: wp.array  # (6,) BC code per face, -1 for interfaces/partition faces
+
+
+def line_layout(solver) -> dict[int, LineLayout]:
+    """Line axis, line grid, colour parity offset and face BC codes of every sub-block."""
+    if solver.line_axes is None:
+        raise RuntimeError("the implicit solver needs line axes (parallel.keep_lines)")
+    out = {}
+    for sb in solver.subs:
+        la = solver.line_axes[sb.parent]
+        if sb.lo[la] != 0 or sb.hi[la] != sb.parent_nn[la] - 1:
+            raise RuntimeError(f"sub-block {sb.id} does not contain whole lines along axis {la}")
+        o1, o2 = [a for a in range(3) if a != la]
+        codes = [bc_code(sb.face_bc[f], "none") if f in sb.face_bc else -1 for f in range(6)]
+        out[sb.id] = LineLayout(la, (sb.nc[o1], sb.nc[o2]), (sb.lo[o1] + sb.lo[o2]) % 2,
+                                wp.array(np.array(codes, dtype=np.int32), dtype=int, device=sb.device))
+    return out
+
+
+@dataclass
+class _Lines:
+    la: int
+    dims: tuple
+    offset: int
+    fcode: wp.array
     D: wp.array
     Lo: wp.array
     Up: wp.array
@@ -531,32 +579,30 @@ class ImplicitSolver:
     def __init__(self, solver):
         self.s = solver
         self.cfg = solver.cfg.rans
-        if solver.line_axes is None:
-            raise RuntimeError("the implicit solver needs line axes (parallel.keep_lines)")
         self.mp = get_mixed(solver.prec.name, self.cfg.solve_precision)
         self.k_assemble, self.k_line, self.k_update = implicit_kernels(self.mp)
         self.k_rhs, _ = mixed_kernels(self.mp)
         self.I = solver.integrator
-        self.jt = 1 if self.cfg.jacobian == "roe" else 0
+        self.jacobian = jacobian_type(solver.cfg)
+        self.jc = wp.types.vector(4, self.mp.solve.scalar)(
+            1.0 if self.jacobian == "roe" else 0.0, self.cfg.implicit_dissipation, self.cfg.jacobian_entropy_fix,
+            self.cfg.jacobian_entropy_fix_linear)
         self.iteration = 0
+        self.last_sweeps = 0
         self.res0 = None
         self.history: list[tuple[int, float, float, np.ndarray]] = []
         sp = self.mp.solve
         ng = solver.ng
         self.lines: dict[int, _Lines] = {}
-        for sb in solver.subs:
-            la = solver.line_axes[sb.parent]
-            if sb.lo[la] != 0 or sb.hi[la] != sb.parent_nn[la] - 1:
-                raise RuntimeError(f"sub-block {sb.id} does not contain whole lines along axis {la}")
-            o1, o2 = [a for a in range(3) if a != la]
-            pad = sb.padded_shape_cells(ng)
-            codes = [bc_code(sb.face_bc[f], "none") if f in sb.face_bc else -1 for f in range(6)]
-            z = lambda dt: wp.zeros(pad, dtype=dt, device=sb.device)  # noqa: E731
-            self.lines[sb.id] = _Lines(
-                la=la, dims=(sb.nc[o1], sb.nc[o2]), offset=(sb.lo[o1] + sb.lo[o2]) % 2,
-                fcode=wp.array(np.array(codes, dtype=np.int32), dtype=int, device=sb.device),
+        for sid, lay in line_layout(solver).items():
+            sb = next(b for b in solver.subs if b.id == sid)
+            z = lambda dt: wp.zeros(sb.padded_shape_cells(ng), dtype=dt, device=sb.device)  # noqa: E731
+            self.lines[sid] = _Lines(
+                la=lay.la, dims=lay.dims, offset=lay.offset, fcode=lay.fcode,
                 D=z(sp.mat55), Lo=z(sp.mat55), Up=z(sp.mat55), G=z(sp.mat55), Y=z(sp.vec5),
                 rhs=z(sp.vec5), dq=z(sp.vec5), dq2=z(sp.vec5))
+        self.turb = solver.turbulence
+        self.res0_turb = None
         st = self.I.params.w_inf
         rho, u, v, w, pr = (float(x) for x in st)
         self.ref = np.array([rho, rho, rho, rho, pr / (solver.gas.gamma - 1.0) + 0.5 * rho * (u * u + v * v + w * w)])
@@ -583,30 +629,44 @@ class ImplicitSolver:
             L, m, dev = self.lines[sid], s.metrics[sid], d.sub.device
             wp.launch(self.k_assemble, dim=d.sub.nc,
                       inputs=[d.W, d.mut, m.Si, m.Sj, m.Sk, m.vol, sc(cfl), ng, wp.vec3i(*d.sub.nc), L.la, L.fcode, P,
-                              sc(self.cfg.implicit_dissipation), self.jt],
+                              self.jc],
                       outputs=[L.D, L.Lo, L.Up], device=dev)
             wp.launch(self.k_rhs, dim=d.sub.nc, inputs=[d.R, ng], outputs=[L.rhs], device=dev)
             L.dq.zero_()
             L.dq2.zero_()
 
-    def relax(self, sweeps: int | None = None) -> None:
-        """Line relaxation sweeps on the assembled system; the correction ends up in ``dq``."""
+    def relax(self, sweeps: int | None = None) -> int:
+        """Line relaxation sweeps on the assembled system; the correction ends up in ``dq``. With
+        ``sweeps`` None: adaptive (rans.min_sweeps .. rans.sweeps, rans.sweep_tolerance). Returns
+        the number of sweeps."""
         s, ng, P = self.s, self.s.ng, self.I.params
         zebra = self.cfg.smoother == "zebra"
-        for _ in range(self.cfg.sweeps if sweeps is None else sweeps):
+        fixed = sweeps is not None
+        nmax = sweeps if fixed else self.cfg.sweeps
+        done = 0
+        for sweep in range(nmax):
+            check = (not fixed) and sweep + 1 >= self.cfg.min_sweeps
+            if check and zebra:
+                for L in self.lines.values():
+                    wp.copy(L.dq2, L.dq)
             for color in ((0, 1) if zebra else (-1,)):
                 for sid, d in self.I.data.items():
                     L, m, dev = self.lines[sid], s.metrics[sid], d.sub.device
                     out = L.dq if zebra else L.dq2
                     wp.launch(self.k_line, dim=L.dims,
                               inputs=[d.W, d.mut, m.Si, m.Sj, m.Sk, m.vol, ng, wp.vec3i(*d.sub.nc), L.la, L.fcode,
-                                      P, self.mp.solve.scalar(self.cfg.implicit_dissipation), self.jt, L.D, L.Lo, L.Up,
+                                      P, self.jc, L.D, L.Lo, L.Up,
                                       L.rhs, L.dq, color, L.offset, L.G, L.Y],
                               outputs=[out], device=dev)
                 if not zebra:
                     for L in self.lines.values():
                         L.dq, L.dq2 = L.dq2, L.dq
                 s.halo.exchange({sid: L.dq for sid, L in self.lines.items()}, stages=(0,))
+            done = sweep + 1
+            if check and sweep_converged([(L.dq, L.dq2) for L in self.lines.values()], ng, self.cfg.sweep_tolerance):
+                break
+        self.last_sweeps = done
+        return done
 
     def update(self) -> None:
         s, ng = self.s, self.s.ng
@@ -620,15 +680,30 @@ class ImplicitSolver:
         state before the update."""
         self.I.rhs(0.0, 0)
         res, per = self.residual_norm()
+        rt = 0.0
+        if self.turb is not None:
+            self.turb.residual()
+            rt = self.turb.residual_norm()
+            if self.res0_turb is None:
+                self.res0_turb = rt if rt > 0 else 1.0
         if self.res0 is None:
             self.res0 = res if res > 0 else 1.0
         cfl = self.cfl(res)
         self.assemble(cfl)
         self.relax()
         self.update()
+        if self.turb is not None:
+            self.turb.implicit_step(cfl, self.cfg, self.cfg.smoother == "zebra")
         self.iteration += 1
-        self.history.append((self.iteration, cfl, res, per))
+        self.history.append((self.iteration, cfl, res, per, rt))
         return res
+
+    def converged(self) -> bool:
+        h = self.history[-1]
+        ok = h[2] <= self.cfg.tolerance * self.res0
+        if self.turb is not None:
+            ok = ok and h[4] <= self.cfg.tolerance * self.res0_turb
+        return ok
 
     def run(self, max_iterations: int | None = None, log_every: int = 10, history_file=None) -> bool:
         """Iterate until the residual has dropped by ``rans.tolerance`` (returns True) or the
@@ -638,12 +713,14 @@ class ImplicitSolver:
         converged = False
         for _ in range(n):
             res = self.iterate()
+            rt = self.history[-1][4]
             if self.iteration % max(log_every, 1) == 0 or self.iteration == 1:
-                log.info("iter %6d  cfl %9.4g  res %.6e  drop %.3e  (%.1f s)", self.iteration, self.history[-1][1],
-                         res, res / self.res0, _time.perf_counter() - t0)
-            if not math.isfinite(res):
-                raise FloatingPointError(f"residual is {res} at iteration {self.iteration}")
-            if res <= self.cfg.tolerance * self.res0:
+                extra = f"  nut drop {rt / self.res0_turb:.3e}" if self.turb is not None else ""
+                log.info("iter %6d  cfl %9.4g  res %.6e  drop %.3e%s  (%.1f s)", self.iteration, self.history[-1][1],
+                         res, res / self.res0, extra, _time.perf_counter() - t0)
+            if not (math.isfinite(res) and math.isfinite(rt)):
+                raise FloatingPointError(f"residual is {res} (nut {rt}) at iteration {self.iteration}")
+            if self.converged():
                 converged = True
                 break
         if history_file is not None:
@@ -652,8 +729,8 @@ class ImplicitSolver:
         return converged
 
     def write_history(self, path) -> None:
-        lines = ["# iter cfl res(scaled) rms(R/V): rho rhou rhov rhow rhoE"]
-        for it, cfl, res, per in self.history:
-            lines.append(f"{it:7d} {cfl:11.4e} {res:.10e} " + " ".join(f"{x:.6e}" for x in per))
+        lines = ["# iter cfl res(scaled) rms(R/V): rho rhou rhov rhow rhoE; rms(R_nut/V)/nut_inf"]
+        for it, cfl, res, per, rt in self.history:
+            lines.append(f"{it:7d} {cfl:11.4e} {res:.10e} " + " ".join(f"{x:.6e}" for x in per) + f" {rt:.6e}")
         with open(path, "w") as fh:
             fh.write("\n".join(lines) + "\n")

@@ -19,7 +19,7 @@ LES roadmap is in [plan.md](plan.md), and code conventions are in [CLAUDE.md](..
 
 | Stage | Content | Status |
 |---|---|---|
-| R0 | Prerequisites: grid input (CGNS, NMF, formatted Plot3D), FP64 metrics, GPU wall distance, line-aware partitioner | in progress: grid input done |
+| R0 | Prerequisites: grid input (CGNS, NMF, formatted Plot3D), FP64 metrics, GPU wall distance, line-aware partitioner | in progress: grid input and FP64 metrics done |
 | R1 | Pseudo-time implicit core (mixed-precision defect correction, line relaxation) | not started |
 | R2 | SA model (negative-SA) | not started |
 | R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | not started; 2DZP/2DCJ/2DB grids and SA data in `cases/tmr/` |
@@ -68,9 +68,13 @@ Both GPUs run FP64 at 1/64 of the FP32 rate, which drives the mixed-precision de
    - Off-line neighbours are applied matrix-free (Rusanov-split A±·δQ).
    - Line-Jacobi is implemented first and stays available as an option.
 2. **Metrics are differenced in FP64 and stored in the residual precision.**
-   - `compute_metrics` ([grid/metrics.py](../src/wmles_wrap/grid/metrics.py)) currently casts the
-     coordinates to `prec` before differencing.
    - In FP32, a 10⁻⁶c first cell with coordinates up to 30c loses all significant digits.
+   - Done: `compute_metrics` ([grid/metrics.py](../src/wmles_wrap/grid/metrics.py)) differences
+     in FP64 and casts the results; the GCL diagnostic is evaluated on the stored face vectors.
+   - Still open for FP32 residuals: the flux face-gradient correction and the wall-model exchange
+     height use differences of the stored centroids `xc`, so they lose the same digits. If
+     `rans.residual_precision: float32` is pursued, store FP64-differenced cell-to-cell
+     displacement vectors per face (and the wall distance from R0) instead.
 3. **The partitioner keeps lines intact.**
    - `split_blocks` ([grid/partition.py](../src/wmles_wrap/grid/partition.py)) must not bisect a
      parent block along its line axis.
@@ -111,7 +115,9 @@ wall. Use Warp's BVH instead:
 
 ### R0: prerequisites
 
-- FP64 metric differencing.
+- **FP64 metric differencing (done):** face vectors, volumes and centroids are computed in FP64
+  and stored in the run precision. On a 10⁻⁶ first cell 30 units from the origin, the FP32 volume
+  error drops from 138 % (with zero volumes) to 4×10⁻⁸. Float64 runs are bitwise unchanged.
 - A line-axis constraint in the partitioner.
 - Mixed-precision kernel sets, using the existing `kernel_factory` cache in
   [precision.py](../src/wmles_wrap/precision.py).

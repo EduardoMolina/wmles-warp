@@ -28,6 +28,29 @@ def test_gcl_random_grid(precision, tol):
     assert m.vol.numpy().min() > 0
 
 
+def test_float32_metrics_of_thin_cells_far_from_origin():
+    """A 1e-6 first cell 30 units from the origin: float32 coordinates cannot resolve it, so the
+    metrics are differenced in float64 and stored in float32 (relative error ~ float32 eps)."""
+    z = 30.0 + np.concatenate([[0.0], 1e-6 * np.cumsum(1.2 ** np.arange(20))])
+    x = np.linspace(30.0, 30.5, 5)
+    y = np.linspace(-30.0, -29.8, 4)
+    g = np.stack(np.meshgrid(x, y, z, indexing="ij"), axis=-1)
+    g[..., 0] += 1e-3 * np.sin(g[..., 2] * 1e4)  # non-orthogonal cells
+    assert np.float32(z[1]) - np.float32(z[0]) != np.float32(z[1] - z[0])  # naive float32 fails
+    m64 = compute_metrics(g, get_precision("float64"), "cpu")
+    m32 = compute_metrics(g, get_precision("float32"), "cpu")
+    v64, v32 = m64.vol.numpy(), m32.vol.numpy()
+    assert v32.dtype == np.float32 and v64.min() > 0
+    assert np.abs(v32 / v64 - 1).max() < 2e-7
+    for a, b in ((m64.Si, m32.Si), (m64.Sj, m32.Sj), (m64.Sk, m32.Sk)):
+        a, b = a.numpy(), b.numpy()
+        scale = np.linalg.norm(a, axis=-1, keepdims=True)
+        assert np.abs(b - a).max(initial=0.0, where=scale > 0) <= 2e-7 * scale.max()
+        assert np.all(np.abs(b - a) <= 2e-7 * scale)
+    assert np.array_equal(m32.xc.numpy(), m64.xc.numpy().astype(np.float32))
+    assert m32.gcl_max() < 1e-6
+
+
 @pytest.mark.parametrize("partitions", [1, 2, 3, 5, 8])
 @pytest.mark.parametrize("flip", [False, True])
 @pytest.mark.parametrize("staged", [False, True])

@@ -26,6 +26,7 @@ from .grid.connectivity import (
 from .grid.metrics import Metrics, compute_metrics
 from .grid.partition import assign_devices, split_blocks
 from .grid.patches import SplitGrid, split_at_patches, unsplit
+from .grid.wall_distance import WallDistance, compute_wall_distance
 from .io.cgns import read_cgns
 from .io.extrude import extrude_block
 from .io.nmf import read_nmf
@@ -117,6 +118,7 @@ class Solver:
             s.id: compute_metrics(s.xp, self.prec, s.device) for s in self.subs
         }
         self.halo = HaloExchanger(self.subs, build_halo_maps(self.subs, self.interfaces, self.ng))
+        self._wall_distance: WallDistance | None = None
         self.U = {s.id: self._alloc_state(s) for s in self.subs}
         self.init_freestream()
         self.integrator = Integrator(self)
@@ -403,6 +405,13 @@ class Solver:
         p = Path(self.cfg.output.dir)
         return p if p.is_absolute() else self.cfg.case_dir / p
 
+    def wall_distance(self) -> WallDistance:
+        """Distance from every padded cell centroid to the nearest wall (BVH selection, float64
+        distance; see grid/wall_distance.py). Computed on first use."""
+        if self._wall_distance is None:
+            self._wall_distance = compute_wall_distance(self.subs, self.parent_blocks, self.prec, self.ng)
+        return self._wall_distance
+
     def write_output(self, writer: SnapshotWriter | None = None) -> Path:
         writer = writer or SnapshotWriter(self.out_dir)
         blocks = []
@@ -411,6 +420,8 @@ class Solver:
             prim = self.gas.primitives(self.interior(self.U[s.id].numpy()).astype(np.float64))
             data = {k: prim[k] for k in fields if k in prim}
             data["volume"] = self.interior(self.metrics[s.id].vol.numpy()).astype(np.float64)
+            if "wall_distance" in fields:
+                data["wall_distance"] = self.interior(self.wall_distance().d[s.id].numpy()).astype(np.float64)
             blocks.append((f"block{s.parent}_part{s.id}", s.x, data))
         return writer.write(self.step, self.time, blocks)
 

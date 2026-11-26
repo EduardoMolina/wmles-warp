@@ -19,7 +19,7 @@ LES roadmap is in [plan.md](plan.md), and code conventions are in [CLAUDE.md](..
 
 | Stage | Content | Status |
 |---|---|---|
-| R0 | Prerequisites: grid input (CGNS, NMF, formatted Plot3D), FP64 metrics, GPU wall distance, line-aware partitioner | in progress: grid input and FP64 metrics done |
+| R0 | Prerequisites: grid input (CGNS, NMF, formatted Plot3D), FP64 metrics, GPU wall distance, line-aware partitioner | in progress: grid input, FP64 metrics, wall distance done |
 | R1 | Pseudo-time implicit core (mixed-precision defect correction, line relaxation) | not started |
 | R2 | SA model (negative-SA) | not started |
 | R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | not started; 2DZP/2DCJ/2DB grids and SA data in `cases/tmr/` |
@@ -90,26 +90,34 @@ Both GPUs run FP64 at 1/64 of the FP32 rate, which drives the mixed-precision de
 5. **Start simple:** plain defect correction with a switched-evolution-relaxation (SER) CFL ramp.
    Accelerators come in R4.
 
-## Wall distance on the GPU
+## Wall distance on the GPU (done)
 
 `scipy.spatial.cKDTree` runs only on the CPU, and the nearest-centroid distance is inexact near the
-wall. Use Warp's BVH instead:
+wall. [grid/wall_distance.py](../src/wmles_wrap/grid/wall_distance.py) uses Warp's BVH instead
+(`Solver.wall_distance()`, computed on first use; output field `wall_distance`):
 
 1. Collect all wall faces of all parent blocks (BC `wall` / `wall_modeled`) and split each quad
-   into two triangles.
-   - Build one `wp.Mesh` per device; every device holds the full wall surface.
-2. A kernel per sub-block calls `wp.mesh_query_point_no_sign` at each cell centroid and keeps the
-   index of the closest face.
-   - The BVH works in FP32 (`wp.Mesh` points are `vec3f`), so it is used only to *find* the face.
-3. Recompute the point-to-triangle distance to that face in FP64, from the FP64 coordinates.
-   - Near-ties between faces only occur when the candidate distances are nearly equal, so they do
-     not affect the result.
-4. Run once at setup and store d in the residual precision.
-   - Checked on the CPU build of Warp 1.19: `wp.Mesh` and `wp.mesh_query_point_no_sign` work.
-   - The FP32 distance at d = 10⁻⁶ with O(1) coordinates came out as 1.000444×10⁻⁶ (a 4×10⁻⁴
-     error), so the FP64 recompute in step 3 is needed.
-   - Tests: exact analytic distance (flat plate, cylinder) and a brute-force numpy reference on a
-     small grid.
+   into two triangles; zero-area triangles of collapsed faces are dropped.
+   - One `wp.Mesh` per device; every device holds the full wall surface.
+   - Coordinates are shifted by the centre of the wall surface before the FP32 cast.
+2. `k_select`, one thread per padded cell: `wp.mesh_query_point_no_sign` at the FP32-rounded
+   centroid gives a closest triangle. FP32 rounding can pick the wrong one near edges between
+   faces at an angle, so a FP32 box query of half-size d + 4δ (δ bounds the FP32 rounding of
+   the coordinates) re-checks the candidates in FP64. The loop is capped at 256 candidates; a
+   partial check can only lower d.
+   - The original assumption that near-ties do not matter was wrong: 30 units from the surface
+     centre, points 10⁻⁷–10⁻⁵ above a sharp ridge get up to 857 % error from the FP32 selection
+     alone, and 7×10⁻⁹ (FP64 rounding) with the re-check.
+3. `k_distance`: FP64 point-to-triangle distance (Ericson) to the selected triangle, from FP64
+   centroids and vertices, stored in the run precision. The selected triangle is kept, so d(X)
+   with frozen faces is a separate differentiable kernel (adjoint design rule 3).
+4. Tests ([tests/test_wall_distance.py](../tests/test_wall_distance.py)):
+   - Exact analytic distances: flat plate with a run-in (float64: 10⁻¹³; float32 storage 30 units
+     out with a 10⁻⁶ first cell: FP32 rounding only), faceted cylinder (10⁻¹²), TMR 2DZP grid.
+   - A brute-force numpy reference on a curvilinear two-block grid, partitioning independence, the
+     ridge near-tie case, no walls, collapsed faces.
+   - 2DCJ: both sides of the zero-thickness plate match the analytic strip distance to 7×10⁻¹⁴.
+   - Cost on the CPU build: 2.3 s for the finest 2DZP grid (1.08M padded cells), compile included.
 
 ## Stages
 
@@ -121,7 +129,7 @@ wall. Use Warp's BVH instead:
 - A line-axis constraint in the partitioner.
 - Mixed-precision kernel sets, using the existing `kernel_factory` cache in
   [precision.py](../src/wmles_wrap/precision.py).
-- GPU wall distance (above).
+- **GPU wall distance (done, above).**
 - **Grid input with patch information (done, branch `rans-r0`):**
   - Structured CGNS reader [io/cgns.py](../src/wmles_wrap/io/cgns.py) for both storage formats:
     HDF5 through `h5py` (ICEM/ANSA/Pointwise exports), and ADF through a small pure-Python reader of

@@ -304,6 +304,9 @@ def make_kernels(prec: Precision):
             if side == 1:
                 g = ng + nc - 1 + m
                 i = ng + nc - m
+            # blocks thinner than ng cells (e.g. one-cell-thick quasi-2D grids): mirror the
+            # last interior cell instead of reading the opposite ghost layers
+            i = wp.min(wp.max(i, ng), ng + nc - 1)
             gi = cell(axis, g, t1, t2)
             ii = cell(axis, i, t1, t2)
             Wi = W[ii[0], ii[1], ii[2]]

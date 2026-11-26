@@ -25,7 +25,10 @@ from .grid.connectivity import (
 )
 from .grid.metrics import Metrics, compute_metrics
 from .grid.partition import assign_devices, split_blocks
+from .grid.patches import SplitGrid, split_at_patches, unsplit
+from .io.cgns import read_cgns
 from .io.extrude import extrude_block
+from .io.nmf import read_nmf
 from .io.output import SnapshotWriter
 from .io.plot3d import read_plot3d
 from .io.restart import read_restart, write_restart
@@ -38,11 +41,19 @@ from .precision import get_precision
 log = logging.getLogger("wmles_wrap")
 
 
-def load_grid(cfg: CaseConfig) -> list[np.ndarray]:
-    """Read, scale, extrude and orient (right-handed) the parent grid blocks."""
-    blocks = read_plot3d(cfg.grid_path)
-    out = []
-    for b, x in enumerate(blocks):
+def load_grid(cfg: CaseConfig) -> SplitGrid:
+    """Read, split at patches (NMF/CGNS), scale, extrude and orient (right-handed) the parent
+    grid blocks. Returns the blocks with the patch labels of their faces."""
+    if cfg.grid.format == "cgns":
+        blocks, patches, _ = read_cgns(cfg.grid_path, base=cfg.grid.base)
+        grid = split_at_patches(blocks, patches)
+    else:
+        blocks = read_plot3d(cfg.grid_path)
+        if cfg.nmf_path is not None:
+            grid = split_at_patches(blocks, read_nmf(cfg.nmf_path, [b.shape[:3] for b in blocks]))
+        else:
+            grid = unsplit(blocks)
+    for b, x in enumerate(grid.blocks):
         if cfg.grid.extrude is not None:
             if x.shape[2] != 1:
                 raise ValueError(f"grid.extrude given but block {b} is already 3D {x.shape}")
@@ -50,12 +61,22 @@ def load_grid(cfg: CaseConfig) -> list[np.ndarray]:
         if min(x.shape[:3]) < 2:
             raise ValueError(f"block {b} has fewer than 2 nodes in a direction: {x.shape}; "
                              "2D grids need grid.extrude")
-        x = x * cfg.grid_scale
-        if _handedness(x) < 0:
+        grid.blocks[b] = x * cfg.grid_scale
+        if _handedness(grid.blocks[b]) < 0:
             log.warning("block %d is left-handed; reversing k index", b)
-            x = np.ascontiguousarray(x[:, :, ::-1])
-        out.append(x)
-    return out
+            grid.flip_k(b)
+    return grid
+
+
+def check_imported_interfaces(grid: SplitGrid, interfaces) -> None:
+    """Every face on a 1-to-1 patch of the grid file must have been matched geometrically."""
+    from .config import FACE_NAMES
+
+    connected = {(i.recv, i.recv_face) for i in interfaces}
+    missing = sorted(grid.interface_faces - connected)
+    if missing:
+        raise ValueError("1-to-1 interfaces in the grid file without a geometric match: "
+                         + ", ".join(f"block {b} {FACE_NAMES[f]}" for b, f in missing))
 
 
 def _handedness(x: np.ndarray) -> float:
@@ -76,10 +97,12 @@ class Solver:
         self.time = 0.0
 
         t0 = _time.perf_counter()
-        self.parent_blocks = load_grid(cfg)
+        self.grid = load_grid(cfg)
+        self.parent_blocks = self.grid.blocks
         parents = parent_blocks_as_subs(self.parent_blocks)
         translations = [p.translation for p in cfg.periodic]
-        self.interfaces = detect_interfaces(parents, translations)  # parent level
+        self.interfaces = detect_interfaces(parents, translations, bc_faces=self.grid.bc_faces)  # parent level
+        check_imported_interfaces(self.grid, self.interfaces)
         build_padded_nodes(parents, self.interfaces, self.ng)
 
         self.devices = resolve_devices(cfg.parallel.devices)
@@ -88,7 +111,7 @@ class Solver:
         self.subs: list[SubBlock] = split_blocks(self.parent_blocks, nparts, min_cells=max(4, self.ng))
         self.device_load = assign_devices(self.subs, self.devices)
         slice_padded_nodes(self.subs, parents, self.ng)
-        assign_boundary_conditions(self.subs, self.interfaces, cfg.boundaries)
+        assign_boundary_conditions(self.subs, self.interfaces, cfg.boundaries, self.grid.labels)
 
         self.metrics: dict[int, Metrics] = {
             s.id: compute_metrics(s.xp, self.prec, s.device) for s in self.subs
@@ -450,6 +473,15 @@ class Solver:
             f"precision        : {self.prec.name}",
             f"devices          : {self.devices}",
             f"parent blocks    : {[tuple(x.shape[:3]) for x in self.parent_blocks]} (nodes)",
+        ]
+        split = any(o != (b, (0, 0, 0)) for b, o in enumerate(self.grid.origin))
+        for b, x in enumerate(self.parent_blocks):
+            fb, lo = self.grid.origin[b]
+            lab = {FACE_NAMES[f]: "/".join(v) for f, v in sorted(self.grid.labels[b].items())}
+            if split or lab:
+                rng = ", ".join(f"{l}:{l + n - 1}" for l, n in zip(lo, x.shape[:3]))
+                lines.append(f"  parent {b:3d} = file block {fb} nodes [{rng}] patches {lab}")
+        lines += [
             f"total cells      : {sum(s.ncells for s in self.subs):,}",
             f"sub-blocks       : {len(self.subs)}",
         ]

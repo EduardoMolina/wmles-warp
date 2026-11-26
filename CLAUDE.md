@@ -35,7 +35,7 @@ The dev machine is macOS with a **CPU-only Warp build**; production is 8× L40S 
 
 - **Index conventions** ([grid/block.py](src/wmles_wrap/grid/block.py)): logical cell `c` lies between nodes `c` and `c+1`. Device arrays are padded with `ng` (≥2) ghost layers, so padded = logical + ng. Faces are numbered 0..5 = imin, imax, jmin, jmax, kmin, kmax (axis = f//2, side = f%2).
 - **Setup pipeline** ([solver.py](src/wmles_wrap/solver.py)):
-  1. Read Plot3D, optionally extrude, scale by `1/ref_length`, flip k for left-handed blocks.
+  1. Read the grid (Plot3D binary/formatted, optionally with a NASA `.nmf`, or structured CGNS in HDF5 or ADF), split blocks at patch boundaries ([grid/patches.py](src/wmles_wrap/grid/patches.py)), optionally extrude, scale by `1/ref_length`, flip k for left-handed blocks (swapping kmin/kmax patch labels).
   2. Detect connectivity at the **parent-block** level.
   3. Build parent padded nodes (mirror at physical boundaries, donor copy minus periodic offset at interfaces).
   4. Split into sub-blocks and assign them to devices.
@@ -51,7 +51,8 @@ The dev machine is macOS with a **CPU-only Warp build**; production is 8× L40S 
 - **Halo exchange** ([parallel/halo.py](src/wmles_wrap/parallel/halo.py)): one index list per (donor, recv) pair. On the same device it uses a direct gather/scatter kernel; across devices it packs, does `wp.copy` (P2P if enabled), then unpacks. `force_staged=True` tests the cross-device path on one device. It is currently synchronous; overlap with streams is planned.
 - **Precision**: kernels come from factories cached on a `Precision` ([precision.py](src/wmles_wrap/precision.py)). Modules that define Warp kernels with closure-captured types must **not** use `from __future__ import annotations`: Warp can't resolve string annotations against closures.
 - **Nondimensionalization** ([config.py](src/wmles_wrap/config.py)): reference ρ, U = M·a_ref, T_ref, L_ref, so `p = ρT/(γM²)` and μ* = μ(T)/μ(T_ref)/Re. The state is conservative `vec5` [ρ, ρu, ρv, ρw, ρE].
-- **Config**: dataclasses with strict validation (unknown keys are errors). BCs attach per parent face name (optionally per `block`); every non-interface parent face must have one.
+- **Config**: dataclasses with strict validation (unknown keys are errors). BCs attach per parent face name and/or grid-file patch label (`boundaries[].patches`), optionally per `block` (indices after patch splitting); the last matching entry wins, and every non-interface parent face must have one.
+- **Patches** ([grid/patches.py](src/wmles_wrap/grid/patches.py)): CGNS/NMF sub-face BCs and 1-to-1 interfaces are made full-face by cutting blocks at every patch boundary and carrying the cuts through the 1-to-1 transforms to a fixed point. Interfaces are still found geometrically; imported 1-to-1 faces without a geometric match are an error. Faces with a BC patch are only connected through periodicity (coincident BC faces are a zero-thickness wall, as in TMR 2DCJ).
 - **Restart** files store per-*parent*-block interior states, plus the wall-model state (τ_w, q, so the equilibrium model resumes warm-started) and, once sampling has started, the statistics sums, so a run can restart with a different partitioning or device count without losing its averages (`run.restart_keep` prunes old periodic restarts).
 
 ## Grids

@@ -1,6 +1,7 @@
 """NASA Plot3D grid reader/writer (pure numpy).
 
-Supports the common binary variants, detected automatically:
+Supports the common variants, detected automatically:
+  * formatted (ASCII) files, e.g. the NASA TMR ``.p3dfmt`` grids
   * Fortran unformatted sequential (4-byte record markers) or raw C binary
   * little / big endian
   * single / double precision
@@ -110,9 +111,66 @@ def _read_raw(buf: bytes, endian: str) -> list[np.ndarray]:
     raise Plot3DError("could not interpret raw binary layout as Plot3D grid")
 
 
+_TEXT_BYTES = frozenset(b"0123456789+-.eEdD \t\r\n")
+
+
+def _is_formatted(buf: bytes) -> bool:
+    head = buf[:4096]
+    return len(head) > 0 and all(c in _TEXT_BYTES for c in head)
+
+
+def _read_formatted(buf: bytes) -> list[np.ndarray]:
+    """Formatted (ASCII) Plot3D, whitespace separated, Fortran D exponents allowed. 2D files
+    may carry two coordinates (x, y; z = 0) or three."""
+    text = buf.decode("ascii").translate(str.maketrans("dD", "eE"))
+    try:
+        vals = np.array(text.split(), dtype=np.float64)
+    except ValueError:
+        raise Plot3DError("formatted Plot3D file contains non-numeric tokens") from None
+
+    def ints(a: np.ndarray) -> np.ndarray | None:
+        if a.size and np.all(a == np.round(a)) and np.all(a > 0):
+            return a.astype(np.int64)
+        return None
+
+    layouts = []
+    nb = ints(vals[:1])
+    if nb is not None:
+        for nd in (3, 2):
+            d = ints(vals[1 : 1 + int(nb[0]) * nd])
+            if d is not None and d.size == int(nb[0]) * nd:
+                layouts.append((d.reshape(-1, nd), 1 + d.size))
+    for nd in (3, 2):
+        d = ints(vals[:nd])
+        if d is not None and d.size == nd:
+            layouts.append((d.reshape(1, nd), nd))
+    for dims_arr, offset in layouts:
+        dims = [(int(d[0]), int(d[1]), int(d[2]) if d.size == 3 else 1) for d in dims_arr]
+        npts = [a * b * c for a, b, c in dims]
+        ncoords = (3,) if dims_arr.shape[1] == 3 else (3, 2)
+        for nc in ncoords:
+            for ib in (0, 1):
+                if vals.size - offset != sum(n * (nc + ib) for n in npts):
+                    continue
+                out, pos = [], offset
+                for d, n in zip(dims, npts):
+                    xyz = np.zeros((3, n))
+                    xyz[:nc] = vals[pos : pos + nc * n].reshape(nc, n)
+                    pos += n * (nc + ib)
+                    arr = xyz.reshape(3, d[2], d[1], d[0])  # Fortran order: i fastest
+                    out.append(np.ascontiguousarray(arr.transpose(3, 2, 1, 0)))
+                return out
+    raise Plot3DError("could not interpret formatted Plot3D layout")
+
+
 def read_plot3d(path: str | Path) -> list[np.ndarray]:
-    """Read a binary Plot3D grid. Returns a list of (ni, nj, nk, 3) float64 arrays."""
+    """Read a Plot3D grid (binary or formatted). Returns a list of (ni, nj, nk, 3) float64 arrays."""
     buf = Path(path).read_bytes()
+    if _is_formatted(buf):
+        try:
+            return _read_formatted(buf)
+        except Plot3DError as e:
+            raise Plot3DError(f"{path}: {e}") from None
     for endian in ("<", ">"):
         recs = _fortran_records(buf, endian)
         if recs is not None:

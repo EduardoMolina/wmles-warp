@@ -19,7 +19,7 @@ LES roadmap is in [plan.md](plan.md), and code conventions are in [CLAUDE.md](..
 
 | Stage | Content | Status |
 |---|---|---|
-| R0 | Prerequisites: FP64 metrics, line-aware partitioner, GPU wall distance, CGNS reader | not started |
+| R0 | Prerequisites: grid input (CGNS, NMF, formatted Plot3D), FP64 metrics, GPU wall distance, line-aware partitioner | in progress: grid input done |
 | R1 | Pseudo-time implicit core (mixed-precision defect correction, line relaxation) | not started |
 | R2 | SA model (negative-SA) | not started |
 | R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | not started; 2DZP/2DCJ/2DB grids and SA data in `cases/tmr/` |
@@ -116,20 +116,28 @@ wall. Use Warp's BVH instead:
 - Mixed-precision kernel sets, using the existing `kernel_factory` cache in
   [precision.py](../src/wmles_wrap/precision.py).
 - GPU wall distance (above).
-- CGNS reader `io/cgns.py`:
-  - Built on `h5py` and aimed at structured CGNS/HDF5 exports from ICEM and ANSA.
-  - Reads structured zones, `ZoneGridConnectivity` 1-to-1 and `ZoneBC`.
-  - Parent blocks are **split at sub-face boundaries**, so every interface becomes full-face and
-    the existing connectivity code stays unchanged.
-- TMR grid input (needed by R2/R3):
-  - Formatted (ASCII) Plot3D in [io/plot3d.py](../src/wmles_wrap/io/plot3d.py), which reads only
-    unformatted/raw binary today.
-  - A NASA neutral map file (`.nmf`) reader that maps the TMR BC names (`viscous_solid`,
-    `symmetry_*`, `subsonic_inflow_pt`, `back_pressure`, `farfield_riem`) and the 1-to-1 interfaces
-    onto our BCs. NMF face numbers and sub-face ranges are converted to our faces, and partial
-    faces are split as in the CGNS reader.
-  - The TMR files are already 3D, two planes thick in i, so they need no `grid.extrude`. The i
-    faces become periodic or symmetry.
+- **Grid input with patch information (done, branch `rans-r0`):**
+  - Structured CGNS reader [io/cgns.py](../src/wmles_wrap/io/cgns.py) for both storage formats:
+    HDF5 through `h5py` (ICEM/ANSA/Pointwise exports), and ADF through a small pure-Python reader of
+    the ADF on-disk layout (the TMR CGNS files are ADF, written in 2009). It reads structured zones,
+    `GridCoordinates`, `ZoneBC` (vertex `PointRange`, family names) and `GridConnectivity1to1`.
+    `PointList`, general `GridConnectivity_t` and links are rejected with a clear error.
+  - NASA neutral map file reader [io/nmf.py](../src/wmles_wrap/io/nmf.py) (`grid.nmf`), including
+    swapped and reversed 1-to-1 ranges.
+  - Formatted (ASCII) Plot3D in [io/plot3d.py](../src/wmles_wrap/io/plot3d.py), detected
+    automatically.
+  - [grid/patches.py](../src/wmles_wrap/grid/patches.py) splits blocks at every patch boundary and
+    carries the cuts through the 1-to-1 interfaces until no new cut appears. Every patch then
+    covers whole faces, so the existing full-face connectivity code is unchanged; the imported
+    1-to-1 list only checks the geometric matching.
+  - BCs select faces by patch label (`boundaries[].patches`: NMF names; CGNS BC names, BC types and
+    families). Faces with a BC patch are never matched geometrically except through periodicity,
+    so the two coincident wall faces of the zero-thickness 2DCJ plate stay walls.
+  - The BC kernel handles blocks thinner than the ghost layers (the one-cell-thick TMR grids).
+  - Verified: the TMR Plot3D+NMF and CGNS versions of 2DZP, 2DB and 2DCJ give identical blocks,
+    splits, interfaces and walls; a 2DCJ explicit run is bitwise partition-independent.
+  - The TMR files are already 3D, two planes thick in i, so they need no `grid.extrude`; the i
+    faces are symmetry (slip) or periodic.
 
 ### R1: pseudo-time implicit core (`numerics/implicit.py`)
 

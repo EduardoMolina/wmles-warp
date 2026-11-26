@@ -33,7 +33,12 @@ class ExtrudeCfg:
 @dataclass
 class GridCfg:
     file: str
-    format: str = "plot3d"
+    format: str = "plot3d"  # plot3d (binary or formatted) | cgns (structured; HDF5 or ADF)
+    # NASA neutral map file with BC patches and 1-to-1 interfaces (plot3d only). With patch
+    # information (nmf or cgns), blocks are split so that every patch covers whole faces, and
+    # boundaries can select faces by patch label (boundaries[].patches).
+    nmf: str | None = None
+    base: str | None = None  # cgns: CGNSBase_t name (default: the first base)
     scale: float | None = None  # coordinates are divided by flow.ref_length unless overridden
     extrude: ExtrudeCfg | None = None
 
@@ -112,8 +117,11 @@ class WallModelCfg:
 @dataclass
 class BoundaryCfg:
     type: str
-    faces: list[str]
-    block: int | list[int] | None = None  # None -> all blocks
+    faces: list[str] = field(default_factory=list)  # face names; empty -> any face
+    # patch labels from the grid file (NMF patch names; CGNS BC names, BC types and families);
+    # empty -> any patch. At least one of faces/patches must be given.
+    patches: list[str] = field(default_factory=list)
+    block: int | list[int] | None = None  # None -> all blocks (indices after patch splitting)
     thermal: str = "adiabatic"  # adiabatic | isothermal
     T_wall: float | None = None  # nondimensional (T/T_ref)
     params: dict[str, Any] = field(default_factory=dict)
@@ -211,6 +219,13 @@ class CaseConfig:
         return p if p.is_absolute() else self.case_dir / p
 
     @property
+    def nmf_path(self) -> Path | None:
+        if self.grid.nmf is None:
+            return None
+        p = Path(self.grid.nmf)
+        return p if p.is_absolute() else self.case_dir / p
+
+    @property
     def grid_scale(self) -> float:
         return self.grid.scale if self.grid.scale is not None else 1.0 / self.flow.ref_length
 
@@ -283,7 +298,13 @@ def _validate(cfg: CaseConfig) -> None:
         if val not in allowed:
             raise ConfigError(f"{name}={val!r}; expected one of {allowed}")
 
-    choice(cfg.grid.format, ("plot3d",), "grid.format")
+    choice(cfg.grid.format, ("plot3d", "cgns"), "grid.format")
+    if cfg.grid.nmf is not None and cfg.grid.format != "plot3d":
+        raise ConfigError("grid.nmf is only used with grid.format: plot3d")
+    if cfg.grid.base is not None and cfg.grid.format != "cgns":
+        raise ConfigError("grid.base is only used with grid.format: cgns")
+    if cfg.grid.extrude is not None and (cfg.grid.nmf is not None or cfg.grid.format == "cgns"):
+        raise ConfigError("grid.extrude cannot be combined with patch information (grid.nmf or cgns)")
     choice(cfg.numerics.precision, ("float32", "float64"), "numerics.precision")
     choice(cfg.numerics.flux, ("keep_pe",), "numerics.flux")
     choice(cfg.numerics.sensor, ("ducros_pressure", "ducros", "none"), "numerics.sensor")
@@ -307,6 +328,8 @@ def _validate(cfg: CaseConfig) -> None:
     bc_types = ("wall", "wall_modeled", "slip", "farfield", "inflow", "outflow", "extrapolate", "dirichlet")
     for i, b in enumerate(cfg.boundaries):
         choice(b.type, bc_types, f"boundaries[{i}].type")
+        if not b.faces and not b.patches:
+            raise ConfigError(f"boundaries[{i}]: give faces and/or patches")
         for f in b.faces:
             choice(f, FACE_NAMES, f"boundaries[{i}].faces")
         choice(b.thermal, ("adiabatic", "isothermal"), f"boundaries[{i}].thermal")

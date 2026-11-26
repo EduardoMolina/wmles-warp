@@ -1,0 +1,43 @@
+# NASA TMR 2D zero-pressure-gradient flat plate (VERIF/2DZP): https://tmbwg.github.io/turbmodels/flatplate.html
+# M = 0.2, Re = 5e6 per unit grid length, T = 540 R (300 K). Plate (adiabatic wall) for 0 <= x <= 2 behind a
+# symmetry run-in from x = -0.33333; far field at z = 1. The grids are 3D, one cell thick in i (y), with BC
+# patches in the neutral map file; the wall patch splits the block at the leading edge.
+# Grid files (*.p3dfmt, *.cgns) are not in git: download them from the TMR site into this folder.
+# This case only exercises the grid input and BC mapping (wmles_wrap info). The TMR inflow (total pressure)
+# and outflow (back pressure) BCs map onto the simpler inflow/outflow BCs, and the RANS-SA run comes in R2/R3.
+grid:
+  file: flatplate_clust2_4levelsdown_35x25.p3dfmt
+  format: plot3d
+  nmf: flatplate_clust2_4levelsdown_35x25.nmf
+  # the same grid as CGNS (ADF):
+  #   file: grid_struct_35x25_vol.cgns
+  #   format: cgns
+  # with patches [BCWallViscousHeatFlux], [BCSymmetryPlane, BCExtrapolate], [BCTunnelInflow],
+  # [BCTunnelOutflow], [BCFarfield]
+
+flow:
+  mach: 0.2
+  reynolds: 5.0e+6
+  temperature: 300.0
+  ref_length: 1.0
+
+numerics: {precision: float64, dissipation: roe, cfl: 0.8}
+
+sgs: {model: none}
+
+wall_model: {type: none}
+
+boundaries:
+  - {patches: [viscous_solid], type: wall, thermal: adiabatic}
+  - {patches: [symmetry_y_strong, symmetry_z_strong], type: slip}
+  - {patches: [subsonic_inflow_pt], type: inflow}
+  - {patches: [back_pressure], type: outflow}
+  - {patches: [farfield_riem], type: farfield}
+
+init: {type: freestream}
+
+run: {steps: 0}
+
+parallel: {devices: cpu, partitions: 1}
+
+output: {dir: out}

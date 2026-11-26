@@ -12,8 +12,8 @@ mapped through half-integer node-space positions (c + 1/2).
 
 Connectivity is detected between *parent* blocks (full-face to full-face matches, as in
 face-matched Plot3D grids); sub-block halo maps are derived from it, so partitioning never
-has to re-detect partially overlapping faces. Partial-face patches
-(e.g. from CGNS ZoneGridConnectivity) will be added with the CGNS reader.
+has to re-detect partially overlapping faces. Partial-face patches from CGNS or NMF files
+are made full-face beforehand by splitting the blocks (:mod:`wmles_wrap.grid.patches`).
 """
 
 from __future__ import annotations
@@ -101,10 +101,14 @@ def _build_interface(A: SubBlock, fa: int, B: SubBlock, fb: int, orient, offset)
 
 
 def detect_interfaces(
-    subs: list[SubBlock], translations: list[list[float]] | None = None, rtol: float = 1e-7
+    subs: list[SubBlock], translations: list[list[float]] | None = None, rtol: float = 1e-7,
+    bc_faces: set[tuple[int, int]] | None = None,
 ) -> list[Interface]:
     """Find all face-to-face connections (direct and periodic). Each physical interface
-    yields two entries, one per receiving side."""
+    yields two entries, one per receiving side. Faces in ``bc_faces`` ((id, face) with a BC
+    patch from the grid file) are never connected directly, only through periodicity: two
+    coincident BC faces are the two sides of a zero-thickness wall, not an interface."""
+    bc_faces = bc_faces or set()
     offsets = [np.zeros(3)]
     for t in translations or []:
         t = np.asarray(t, dtype=np.float64)
@@ -120,6 +124,8 @@ def detect_interfaces(
                             continue
                         if k == 0 and A.id == B.id and face_axis(fa) == face_axis(fb):
                             # opposite faces of one block can only touch through periodicity
+                            continue
+                        if k == 0 and ((A.id, fa) in bc_faces or (B.id, fb) in bc_faces):
                             continue
                         orient = _match_faces(A, fa, B, fb, off, rtol)
                         if orient is None:
@@ -297,9 +303,13 @@ def build_halo_maps(subs: list[SubBlock], interfaces: list[Interface], ng: int) 
     return maps
 
 
-def assign_boundary_conditions(subs: list[SubBlock], interfaces: list[Interface], boundaries) -> None:
+def assign_boundary_conditions(subs: list[SubBlock], interfaces: list[Interface], boundaries,
+                               labels: list[dict[int, tuple[str, ...]]] | None = None) -> None:
     """Attach a BoundaryCfg to every sub-block face that lies on an unconnected parent face.
-    ``interfaces`` are parent-level connections."""
+    ``interfaces`` are parent-level connections; ``labels`` are the grid-file patch labels per
+    parent block and face. A boundary entry matches a face if the face name is in ``faces``
+    (or ``faces`` is empty), one of the face's labels is in ``patches`` (or ``patches`` is
+    empty), and the parent block is selected; the last matching entry wins."""
     from ..config import FACE_NAMES
 
     connected = {(i.recv, i.recv_face) for i in interfaces}
@@ -309,13 +319,18 @@ def assign_boundary_conditions(subs: list[SubBlock], interfaces: list[Interface]
         for f in range(6):
             if not s.on_parent_face(f) or (s.parent, f) in connected:
                 continue
+            lab = set(labels[s.parent].get(f, ())) if labels else set()
             bc = None
             for b in boundaries:
                 blocks = b.block if isinstance(b.block, list) else ([b.block] if b.block is not None else None)
-                if FACE_NAMES[f] in b.faces and (blocks is None or s.parent in blocks):
+                if b.faces and FACE_NAMES[f] not in b.faces:
+                    continue
+                if b.patches and not lab & set(b.patches):
+                    continue
+                if blocks is None or s.parent in blocks:
                     bc = b
             if bc is None:
-                missing.append(f"block {s.parent} {FACE_NAMES[f]}")
+                missing.append(f"block {s.parent} {FACE_NAMES[f]}" + (f" (patch {sorted(lab)})" if lab else ""))
             s.face_bc[f] = bc
     if missing:
         raise ValueError("faces without boundary condition or interface: " + ", ".join(sorted(set(missing))))

@@ -20,8 +20,8 @@ LES roadmap is in [plan.md](plan.md), and code conventions are in [CLAUDE.md](..
 | Stage | Content | Status |
 |---|---|---|
 | R0 | Prerequisites: grid input (CGNS, NMF, formatted Plot3D), FP64 metrics, GPU wall distance, line-aware partitioner, mixed-precision kernels | done (branch `rans-r0`) |
-| R1 | Pseudo-time implicit core (mixed-precision defect correction, line relaxation) | not started |
-| R2 | SA model (negative-SA) | not started |
+| R1 | Pseudo-time implicit core (mixed-precision defect correction, line relaxation) | done (laminar; branch `rans-r0`) |
+| R2 | Dissipative steady residual, then the SA model (negative-SA) | not started |
 | R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | not started; 2DZP/2DCJ/2DB grids and SA data in `cases/tmr/` |
 | R4 | Acceleration: FGMRES and/or FAS multigrid | not started |
 | R5 | Production steady RANS: NASA CRM (DPW-5/6) | not started |
@@ -165,18 +165,65 @@ wall. [grid/wall_distance.py](../src/wmles_wrap/grid/wall_distance.py) uses Warp
   - The TMR files are already 3D, two planes thick in i, so they need no `grid.extrude`; the i
     faces are symmetry (slip) or periodic.
 
-### R1: pseudo-time implicit core (`numerics/implicit.py`)
+### R1: pseudo-time implicit core (`numerics/implicit.py`) — done
 
-- Local time stepping and an SER CFL ramp.
-- First-order Rusanov/Roe Jacobians in FP32.
-- Line-Jacobi, then zebra line Gauss–Seidel.
-- δQ halo exchange between sweeps, using the existing halo maps with an FP32 vec5 array.
-- Verify:
-  - Laminar steady cases converge to machine zero.
-  - The converged result matches the explicit solver's steady state.
+`solver.mode: rans` with a `rans:` block (`turbulence: none` for now). Each outer iteration solves
+one backward-Euler pseudo-time step, (V/Δτ − ∂R/∂Q) δQ = R, approximately; Q += α δQ.
 
-### R2: SA model (`physics/sa.py` plus kernels)
+- **Local time stepping and SER:** V/Δτ = λ/CFL from the explicit spectral radius;
+  CFL = cfl_start·(res₀/res)^β up to cfl_max, rounded to 4 significant digits so the round-off of
+  the global norm cannot make runs partitioning-dependent. A per-cell α ≤ 1 limits the relative
+  density and pressure change (`relax_limit`).
+- **Approximate Jacobian (FP32 by default, `rans.solve_precision`):**
+  - Inviscid: ½A(Q_j, S) per face (exact Euler flux Jacobian); the cell's own central terms
+    cancel by the GCL.
+  - Dissipation: Rusanov (default) or Roe (`rans.jacobian`), scaled by
+    `rans.implicit_dissipation`.
+  - Viscous: thin-layer, linear in V = (ρ, u, T): K_f = |S|²/V_f [μ(I + nnᵀ/3) on u, κ on T, work
+    term], so K ∂V/∂U couples the energy equation to ρ and ρu through T. A scalar viscous
+    coefficient on ρE was tested first: it misses dRes_E/dρ (about 3× the diagonal on Couette) and
+    the iteration stalls.
+  - Wall and slip faces: the linearized ghost state δQ_g = B δQ_i (isothermal ρ_g = p/(R T_g)
+    included) and no dissipation, as in the residual. The operator then conserves mass like the
+    residual; with dissipation or viscous mass terms at walls the corrections pumped mass along
+    the residual's null space (Couette mass 1.0 → 1.045, then 12.9) and convergence stalled.
+  - Farfield, inflow and outflow are explicit (δQ_ghost = 0).
+  - Checked against finite-difference Jacobians of the residual (tests).
+- **Line relaxation:** only the two line blocks are stored; off-line neighbours (and line
+  neighbours across block interfaces) are matrix-free products with the latest δQ. One thread
+  per line runs a 5×5 block Thomas solve (`block_inverse`). `zebra` (default) colours lines by
+  the parity of the parent-block off-line indices; `line_jacobi` double-buffers. δQ halos are
+  exchanged after every colour/sweep. The partitioner keeps lines whole automatically.
+- **Results** (tests in [tests/test_implicit.py](../tests/test_implicit.py)):
+  - Compressible Couette (isothermal walls, viscous heating): 10⁻¹² drop in < 60 iterations
+    (32 with `implicit_dissipation: 0`); u matches the exact linear profile to 10⁻¹⁰; u, T and
+    ρ/ρ̄ match the explicit solver's steady state.
+  - Laminar flat plate (Re = 10⁴, TMR 2DZP 35×25 grid and a synthetic one), Rusanov residual and
+    Jacobian: 10⁻¹² in 163 iterations (zebra), 294 (line-Jacobi), 221 on the 69×49 grid.
+  - Bitwise independent of the partitioning; converged states independent of the smoother and
+    of the solve precision (FP32 vs FP64) to 10⁻⁸.
+  - Local pseudo-time stepping conserves Σ(V/Δτ)δρ, not the total mass: in closed domains
+    (Couette) the converged mass level can differ slightly from the explicit one.
+- **Findings that shape R2/R3:**
+  - The convergence rate is set by how well the operator matches the residual, not by the
+    sweeps or the CFL. With the LES residual (central KEEP-PE + sensor-weighted dissipation) the
+    implicit dissipation that stability needs damps modes the residual does not, and steady
+    convergence is slow (plate: 5×10⁻⁷ after 400 iterations). A Roe residual with the Rusanov
+    operator converges at ~0.98 per iteration.
+  - The Roe operator matches the Roe residual closely but limit-cycles near 10⁻⁷: the
+    residual's |u·n| has a kink at u·n = 0, exactly where faces along walls sit.
+  - Hence the dissipative, smooth steady residual added to R2 below.
+- Not done yet: GPU timing and memory per cell, implicit far-field/inflow/outflow BCs.
 
+### R2: dissipative steady residual, then the SA model (`physics/sa.py` plus kernels)
+
+- **Steady RANS residual first** (R1 finding): the LES residual is central with
+  sensor-weighted dissipation, which the implicit solver converges slowly. RANS needs a
+  second-order upwind residual: Roe with MUSCL reconstruction (smooth limiter, e.g. van Albada or
+  Venkatakrishnan) or JST-type scalar dissipation. Its entropy fix must be smooth on all waves
+  (no |u·n| kink), so the Roe operator converges to machine zero, and its limiter
+  differentiable for the adjoint (design rule 4). Selected by the mode, so the LES residual stays
+  unchanged. Verify: laminar flat plate against Blasius (C_f = 0.664/√Re_x) to machine zero.
 - Negative-SA (Allmaras, Johnson & Spalart 2012) for robustness.
 - First-order upwind convection for ν̃.
 - Segregated scalar tridiagonal line solve for ν̃, run right after the mean flow.

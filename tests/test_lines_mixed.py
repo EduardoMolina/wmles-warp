@@ -70,7 +70,7 @@ def test_solver_keep_lines_partition_independent(tmp_path):
 @pytest.mark.parametrize("precision, tol", [("float64", 1e-12), ("float32", 2e-4)])
 def test_block_solve(precision, tol):
     prec = get_precision(precision)
-    _, k = block_kernels(prec)
+    _, k, _, k_inv = block_kernels(prec)
     rng = np.random.default_rng(4)
     n = 200
     A = rng.standard_normal((n, 5, 5)) + 3.0 * np.eye(5)
@@ -82,6 +82,10 @@ def test_block_solve(precision, tol):
                                 wp.array(b.astype(prec.np_dtype), dtype=prec.vec5)], outputs=[x])
     got = x.numpy()
     assert np.abs(got - want).max() <= tol * np.abs(want).max()
+    X = wp.zeros(n, dtype=prec.mat55)
+    wp.launch(k_inv, dim=n, inputs=[wp.array(A.astype(prec.np_dtype), dtype=prec.mat55)], outputs=[X])
+    inv = np.linalg.inv(A)
+    assert np.abs(X.numpy() - inv).max() <= 10 * tol * np.abs(inv).max()
 
 
 @pytest.mark.parametrize("residual", ["float64", "float32"])
@@ -91,7 +95,7 @@ def test_mixed_transfers(residual):
     ng, nc = 2, (3, 4, 2)
     shape = tuple(n + 2 * ng for n in nc)
     rng = np.random.default_rng(5)
-    R = rng.standard_normal(shape + (5,))
+    R = rng.standard_normal(nc + (5,))
     Q = rng.standard_normal(shape + (5,))
     rhs = wp.full(shape, mp.solve.vec5(7.0, 7.0, 7.0, 7.0, 7.0), dtype=mp.solve.vec5)
     wp.launch(k_rhs, dim=nc, inputs=[wp.array(R.astype(mp.residual.np_dtype), dtype=mp.residual.vec5), ng],
@@ -99,7 +103,7 @@ def test_mixed_transfers(residual):
     r = rhs.numpy()
     inner = (slice(ng, -ng),) * 3
     assert r.dtype == np.float32
-    assert np.array_equal(r[inner], (-R[inner].astype(mp.residual.np_dtype)).astype(np.float32))
+    assert np.array_equal(r[inner], R.astype(mp.residual.np_dtype).astype(np.float32))
     ghost = np.ones(shape, dtype=bool)
     ghost[inner] = False
     assert np.all(r[ghost] == 7.0)  # ghosts untouched

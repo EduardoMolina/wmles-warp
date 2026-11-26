@@ -1,11 +1,13 @@
 """Mixed-precision building blocks of the implicit (defect-correction) solver.
 
-The outer loop evaluates the residual R(Q) in the residual precision (float64 by default); the
-inner loop relaxes the linear system in the solve precision (float32) on 5x5 blocks:
+The outer loop evaluates the residual R(Q) = V dQ/dt (the explicit solver's convention, see
+numerics/kernels.py) in the residual precision (float64 by default); the inner loop relaxes the
+linear system of the backward-Euler pseudo-time step in the solve precision (float32) on 5x5
+blocks:
 
-    rhs = -R(Q)            (residual -> solve precision, ``k_rhs``)
-    relax  M dQ = rhs      (solve precision; block solves with ``block_solve``)
-    Q <- Q + dQ            (solve -> residual precision, ``k_correct``)
+    rhs = R(Q)                        (residual -> solve precision, ``k_rhs``)
+    relax  (V/dtau - dR/dQ) dQ = rhs  (solve precision; ``block_solve``, ``block_inverse``)
+    Q <- Q + dQ                       (solve -> residual precision, ``k_correct``)
 
 The inner precision only changes the convergence rate: the converged state satisfies R(Q) = 0
 in the residual precision. Warp's ``wp.inverse`` stops at 4x4, so 5x5 blocks are solved by
@@ -21,7 +23,8 @@ from ..precision import MixedPrecision, Precision, kernel_factory
 
 @kernel_factory
 def block_kernels(prec: Precision):
-    """``block_solve(A, b)`` (5x5 dense, partial pivoting) and a test kernel ``k_block_solve``."""
+    """``block_solve(A, b)`` and ``block_inverse(A)`` (5x5 dense, partial pivoting), with test
+    kernels ``k_block_solve`` and ``k_block_inverse``."""
     vec5, mat55, scalar = prec.vec5, prec.mat55, prec.scalar
     one = scalar(1.0)
 
@@ -58,12 +61,49 @@ def block_kernels(prec: Precision):
             x[k] = s / M[k, k]
         return x
 
+    @wp.func
+    def block_inverse(A: mat55):
+        """Gauss-Jordan inverse with partial pivoting."""
+        M = mat55(A)
+        X = wp.identity(n=5, dtype=scalar)
+        for k in range(5):
+            p = int(k)
+            amax = wp.abs(M[k, k])
+            for i in range(k + 1, 5):
+                if wp.abs(M[i, k]) > amax:
+                    amax = wp.abs(M[i, k])
+                    p = i
+            if p != k:
+                for j in range(5):
+                    t = M[k, j]
+                    M[k, j] = M[p, j]
+                    M[p, j] = t
+                    t = X[k, j]
+                    X[k, j] = X[p, j]
+                    X[p, j] = t
+            inv = one / M[k, k]
+            for j in range(5):
+                M[k, j] = M[k, j] * inv
+                X[k, j] = X[k, j] * inv
+            for i in range(5):
+                if i != k:
+                    f = M[i, k]
+                    for j in range(5):
+                        M[i, j] = M[i, j] - f * M[k, j]
+                        X[i, j] = X[i, j] - f * X[k, j]
+        return X
+
+    @wp.kernel(module="unique")
+    def k_block_inverse(A: wp.array(dtype=mat55), X: wp.array(dtype=mat55)):
+        i = wp.tid()
+        X[i] = block_inverse(A[i])
+
     @wp.kernel(module="unique")
     def k_block_solve(A: wp.array(dtype=mat55), b: wp.array(dtype=vec5), x: wp.array(dtype=vec5)):
         i = wp.tid()
         x[i] = block_solve(A[i], b[i])
 
-    return block_solve, k_block_solve
+    return block_solve, k_block_solve, block_inverse, k_block_inverse
 
 
 @kernel_factory
@@ -74,10 +114,11 @@ def mixed_kernels(mp: MixedPrecision):
 
     @wp.kernel(module="unique")
     def k_rhs(R: wp.array3d(dtype=rv), ng: int, rhs: wp.array3d(dtype=sv)):
-        """rhs = -R on the interior cells (solve precision)."""
+        """rhs = R on the interior cells (solve precision). ``R`` has the residual's interior
+        shape (as ``Integrator`` stores it), ``rhs`` is padded."""
         i, j, k = wp.tid()
-        r = R[i + ng, j + ng, k + ng]
-        rhs[i + ng, j + ng, k + ng] = sv(-ss(r[0]), -ss(r[1]), -ss(r[2]), -ss(r[3]), -ss(r[4]))
+        r = R[i, j, k]
+        rhs[i + ng, j + ng, k + ng] = sv(ss(r[0]), ss(r[1]), ss(r[2]), ss(r[3]), ss(r[4]))
 
     @wp.kernel(module="unique")
     def k_correct(dQ: wp.array3d(dtype=sv), ng: int, Q: wp.array3d(dtype=rv)):

@@ -110,7 +110,7 @@ class Solver:
         self.peer = enable_peer_access(self.devices)
         nparts = resolve_partitions(cfg.parallel.partitions, self.devices)
         self.line_axes: list[int] | None = None  # per parent block, with parallel.keep_lines
-        if cfg.parallel.keep_lines:
+        if cfg.parallel.keep_lines or cfg.solver.mode == "rans":
             assign_boundary_conditions(parents, self.interfaces, cfg.boundaries, self.grid.labels)
             walls = {(p.id, f) for p in parents for f, bc in p.face_bc.items() if bc.type in WALL_BC_TYPES}
             self.line_axes = line_axes(self.parent_blocks, walls)
@@ -351,7 +351,11 @@ class Solver:
                 break
 
     def run(self) -> None:
-        """Run according to cfg.run: steps/t_end, output, restart cadence."""
+        """Run according to cfg.run: steps/t_end, output, restart cadence (solver.mode: les), or
+        the steady implicit iterations (solver.mode: rans)."""
+        if self.cfg.solver.mode == "rans":
+            self.run_steady()
+            return
         cfg = self.cfg.run
         forces = self.out_dir / "forces.dat"
         if self.step == 0:  # fresh run: start a new force history
@@ -383,6 +387,23 @@ class Solver:
             self.write_output(writer)
         self.write_stats()
         self.write_restart(self.out_dir / "restart_final.npz")
+
+    def run_steady(self) -> bool:
+        """Implicit pseudo-time iterations to a steady state (numerics/implicit.py). Writes the
+        convergence history (convergence.dat), the final field and a restart."""
+        from .numerics.implicit import ImplicitSolver
+
+        if getattr(self, "implicit", None) is None:
+            self.implicit = ImplicitSolver(self)
+        converged = self.implicit.run(log_every=self.cfg.run.log_every,
+                                      history_file=self.out_dir / "convergence.dat")
+        self.step = self.implicit.iteration
+        log.info("steady solver %s after %d iterations (residual drop %.3e)",
+                 "converged" if converged else "stopped", self.step,
+                 self.implicit.history[-1][2] / self.implicit.res0 if self.implicit.history else float("nan"))
+        self.write_output()
+        self.write_restart(self.out_dir / "restart_final.npz")
+        return converged
 
     def interior(self, a: np.ndarray) -> np.ndarray:
         g = self.ng
@@ -506,8 +527,12 @@ class Solver:
             bcs = {FACE_NAMES[f]: b.type for f, b in s.face_bc.items()}
             lines.append(f"  sub {s.id:3d} parent {s.parent} cells {s.nc} on {s.device} bc {bcs}")
         lines.append(f"device load      : {self.device_load}")
-        if self.cfg.parallel.keep_lines:
+        if self.line_axes is not None:
             lines.append(f"line axes        : {['ijk'[a] for a in self.line_axes]} (kept whole by the partitioner)")
+        if self.cfg.solver.mode == "rans":
+            r = self.cfg.rans
+            lines.append(f"steady solver    : {r.smoother}, {r.sweeps} sweeps, {r.jacobian} Jacobian x {r.implicit_dissipation}, "
+                         f"residual {self.prec.name} / solve {r.solve_precision}, CFL {r.cfl_start:g} -> {r.cfl_max:g}")
         nper = sum(1 for i in self.interfaces if i.periodic)
         lines.append(f"block interfaces : {len(self.interfaces)} one-sided ({nper} periodic)")
         gcl = max(m.gcl_max() for m in self.metrics.values())

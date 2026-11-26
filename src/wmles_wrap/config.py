@@ -179,6 +179,31 @@ class ParallelCfg:
 
 
 @dataclass
+class SolverCfg:
+    mode: str = "les"  # les: explicit SSP-RK3 | rans: steady, implicit pseudo-time (docs/plan_rans.md)
+
+
+@dataclass
+class RansCfg:
+    """Steady implicit solver (solver.mode: rans). The residual precision is numerics.precision."""
+
+    turbulence: str = "none"  # none: laminar (SA comes with R2)
+    smoother: str = "zebra"  # zebra (red-black line Gauss-Seidel) | line_jacobi
+    sweeps: int = 8  # linear sweeps per outer iteration
+    solve_precision: str = "float32"  # precision of the linear relaxation (Jacobian blocks, dQ)
+    cfl_start: float = 5.0
+    cfl_max: float = 1.0e4
+    ser_exponent: float = 1.0  # CFL = cfl_start * (res0 / res)^ser_exponent, capped by cfl_max
+    max_iterations: int = 2000
+    tolerance: float = 1.0e-12  # stop when the residual norm drops by this factor
+    relax_limit: float = 0.5  # largest relative density/pressure change per cell and iteration
+    # dissipation in the implicit operator and its scale (1 = as in a fully upwind residual); roe
+    # matches a Roe residual more closely but can limit-cycle (numerics/implicit.py)
+    jacobian: str = "rusanov"  # rusanov | roe
+    implicit_dissipation: float = 1.0
+
+
+@dataclass
 class OutputCfg:
     dir: str = "out"
     fields: list[str] = field(default_factory=lambda: ["rho", "u", "v", "w", "p", "T", "mach"])
@@ -200,6 +225,8 @@ class CaseConfig:
     init: InitCfg = field(default_factory=InitCfg)
     parallel: ParallelCfg = field(default_factory=ParallelCfg)
     output: OutputCfg = field(default_factory=OutputCfg)
+    solver: SolverCfg = field(default_factory=SolverCfg)
+    rans: RansCfg = field(default_factory=RansCfg)
     case_dir: Path = field(default_factory=Path.cwd)
 
     # ---- derived nondimensional constants -------------------------------------------
@@ -341,6 +368,26 @@ def _validate(cfg: CaseConfig) -> None:
     for i, p in enumerate(cfg.periodic):
         if len(p.translation) != 3:
             raise ConfigError(f"periodic[{i}].translation must have 3 components")
+    choice(cfg.solver.mode, ("les", "rans"), "solver.mode")
+    choice(cfg.rans.turbulence, ("none",), "rans.turbulence")
+    choice(cfg.rans.smoother, ("zebra", "line_jacobi"), "rans.smoother")
+    choice(cfg.rans.solve_precision, ("float32", "float64"), "rans.solve_precision")
+    choice(cfg.rans.jacobian, ("rusanov", "roe"), "rans.jacobian")
+    if cfg.rans.sweeps < 1 or cfg.rans.max_iterations < 0:
+        raise ConfigError("rans.sweeps must be >= 1 and rans.max_iterations >= 0")
+    if not 0 < cfg.rans.cfl_start <= cfg.rans.cfl_max:
+        raise ConfigError("rans: need 0 < cfl_start <= cfl_max")
+    if cfg.rans.implicit_dissipation < 0:
+        raise ConfigError("rans.implicit_dissipation must be >= 0")
+    if not 0 < cfg.rans.relax_limit < 1:
+        raise ConfigError("rans.relax_limit must be in (0, 1)")
+    if cfg.solver.mode == "rans":
+        if cfg.sgs.model != "none":
+            raise ConfigError("solver.mode: rans needs sgs.model: none")
+        if cfg.wall_model.type != "none":
+            raise ConfigError("solver.mode: rans needs wall_model.type: none (wall_modeled faces are no-slip walls)")
+        if cfg.forcing.type == "constant_mass_flux":
+            raise ConfigError("solver.mode: rans does not support forcing.type: constant_mass_flux")
     if cfg.flow.ref_area is not None and cfg.flow.ref_area <= 0:
         raise ConfigError("flow.ref_area must be positive")
     if cfg.run.stats_every < 1:

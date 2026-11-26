@@ -13,3 +13,4 @@ cases/a_airfoil/*.xyz
 cases/a_airfoil/*.p3d
 cases/a_airfoil/case_coarse.yaml
 cases/a_airfoil/out*/
+cases/tmr/**/*.p3dfmt

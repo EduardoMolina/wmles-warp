@@ -9,8 +9,11 @@ LES roadmap is in [plan.md](plan.md), and code conventions are in [CLAUDE.md](..
 - The modes reuse the grid, connectivity, halo, BC, I/O, `Params` and `make_kernels` flux functions.
 - The mode is selected by `solver.mode: les | rans | urans | ddes`.
 - The production target is the transonic NASA Common Research Model (CRM).
+- Mesh deformation comes before the adjoint. It starts with jig → flight shape and then becomes a
+  transposable surface → volume operator.
 - Gradient-based shape optimization (discrete adjoint) is a future target. The design decisions
   that enable it are taken from the first stage on.
+- Chimera (overset) grids are the last item, for wing/fuselage/tail configurations.
 
 ## Status
 
@@ -19,12 +22,14 @@ LES roadmap is in [plan.md](plan.md), and code conventions are in [CLAUDE.md](..
 | R0 | Prerequisites: FP64 metrics, line-aware partitioner, GPU wall distance, CGNS reader | not started |
 | R1 | Pseudo-time implicit core (mixed-precision defect correction, line relaxation) | not started |
 | R2 | SA model (negative-SA) | not started |
-| R3 | TMR validation: flat plate, bump, NACA 0012 | not started; grids being downloaded |
+| R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | not started; 2DZP/2DCJ/2DB grids and SA data in `cases/tmr/` |
 | R4 | Acceleration: FGMRES and/or FAS multigrid | not started |
 | R5 | Production steady RANS: NASA CRM (DPW-5/6) | not started |
 | R6 | Dual-time stepping (URANS) | not started |
 | R7 | DDES / IDDES | not started |
-| R8 | Discrete adjoint and shape gradients | target; design rules apply from R0 |
+| R8 | Mesh deformation: jig → flight mesh (twist and bending about an elastic axis), then general surface → volume | not started |
+| R9 | Discrete adjoint and shape gradients | target; design rules apply from R0 |
+| R10 | Chimera (overset) grids for wing/fuselage/tail configurations | not started |
 
 ## Hardware
 
@@ -116,6 +121,15 @@ wall. Use Warp's BVH instead:
   - Reads structured zones, `ZoneGridConnectivity` 1-to-1 and `ZoneBC`.
   - Parent blocks are **split at sub-face boundaries**, so every interface becomes full-face and
     the existing connectivity code stays unchanged.
+- TMR grid input (needed by R2/R3):
+  - Formatted (ASCII) Plot3D in [io/plot3d.py](../src/wmles_wrap/io/plot3d.py), which reads only
+    unformatted/raw binary today.
+  - A NASA neutral map file (`.nmf`) reader that maps the TMR BC names (`viscous_solid`,
+    `symmetry_*`, `subsonic_inflow_pt`, `back_pressure`, `farfield_riem`) and the 1-to-1 interfaces
+    onto our BCs. NMF face numbers and sub-face ranges are converted to our faces, and partial
+    faces are split as in the CGNS reader.
+  - The TMR files are already 3D, two planes thick in i, so they need no `grid.extrude`. The i
+    faces become periodic or symmetry.
 
 ### R1: pseudo-time implicit core (`numerics/implicit.py`)
 
@@ -135,12 +149,34 @@ wall. Use Warp's BVH instead:
 - μ_t feeds the existing viscous flux.
 - Verify:
   - NASA TMR SA manufactured solution (MMS).
-  - TMR 2D zero-pressure-gradient flat plate: Cf and grid convergence.
+  - TMR 2D zero-pressure-gradient flat plate (2DZP): Cf and grid convergence (see R3).
 
-### R3: TMR validation
+### R3: TMR verification
 
-- TMR 2D bump-in-channel, and the NACA 0012 at α = 0°, 10° and 15°.
-- Compare against the CFL3D/FUN3D SA reference data.
+These three NASA TMR verification cases are the turbulence-model verification set. Each is
+compared with the CFL3D/FUN3D SA results on the same grid family, using the grid-convergence plots
+against h = 1/√N.
+
+- **2DZP, zero-pressure-gradient flat plate**
+  ([TMR page](https://tmbwg.github.io/turbmodels/flatplate.html), `cases/tmr/2DZP/`)
+  - M = 0.2, Re = 5×10⁶ per unit length. Plate 0 ≤ x ≤ 2 behind a symmetry run-in.
+  - Compare C_f at x = 0.97 (`cf_convergence.dat`) and plate drag C_D (`drag_convergence.dat`).
+  - Also C_f(x) and the u⁺–y⁺ profile on the finest grid.
+- **2DCJ, coflowing jet** (formerly "2D planar shear";
+  [TMR page](https://tmbwg.github.io/turbmodels/shear.html), `cases/tmr/2DCJ/`)
+  - A free jet from between two thin plates (one wall at y = 0.5, −10 < x < 0, centerline
+    symmetry). Inner stream at M ≈ 0.5, outer stream at M ≈ 0.25, Re = 5×10⁴ per unit length.
+  - It is a 3-block grid, so it also tests the multiblock interfaces. The free shear layer tests
+    SA away from walls. The farfield ν̃ is set to at least 3ν_∞.
+  - Wall distance must be computed to the true wall. This tests the BVH wall distance near the
+    plate trailing edge.
+  - Compare plate C_D and u at x = 2.71623, 29.2468 and 95.501 (`convergence.dat`), and u along
+    y = 0 (`uvel_y_0.dat`).
+- **2DB, bump-in-channel**
+  ([TMR page](https://tmbwg.github.io/turbmodels/bump.html), `cases/tmr/2DB/`)
+  - M = 0.2, Re = 3×10⁶ per unit length. Curved wall with a pressure gradient.
+  - Compare C_f at x = 0.75 (`cf_convergence_sa.dat`), plus Cp and C_f along the bump.
+- Next, outside the TMR verification set: the NACA 0012 at α = 0°, 10° and 15°.
 
 ### R4: acceleration
 
@@ -156,6 +192,7 @@ wall. Use Warp's BVH instead:
   - Grids: the DPW-5 common multiblock structured family (tiny to ultra-fine, about 0.6 M to
     about 150 M cells).
 - **Second configuration: DPW-6 wing-body** with the measured aeroelastic wing shape at each α.
+  The flight shape comes from the R8 step-1 tool or from the supplied DPW-6 grids.
   - α sweep up to buffet onset.
   - This is the bridge to R6/R7 and to the Phase 4 buffet work in [plan.md](plan.md).
 - **Reference data:**
@@ -216,7 +253,53 @@ wall. Use Warp's BVH instead:
   - OAT15A buffet with DDES: experimental frequency and pressure RMS, and comparison with the WMLES
     results from Phase 4.
 
-### R8: discrete adjoint and shape gradients (target)
+### R8: mesh deformation
+
+**Step 1: flight mesh from the jig mesh (first deliverable)**
+- Inputs, in a YAML `deform:` block:
+  - The elastic axis as a polyline of points from root to tip.
+  - Tables of bending deflection w(η) and twist θ(η) about the axis (nose-up positive). An in-plane
+    (fore-aft) deflection is optional. η is the normalized distance along the axis.
+  - The surface patches that move (the wing BC faces) and the ones that stay fixed (fuselage,
+    symmetry plane, far field).
+- Surface motion:
+  - Project each wing surface node onto the elastic axis to get η.
+  - Rotate the section about the local axis by θ(η).
+  - Rotate it by the bending slope dw/dη, so sections stay normal to the bent axis.
+  - Translate it by w(η).
+  - The tables are cubic splines. θ = w = 0 at the wing root/junction, so the displacement blends
+    to zero there.
+- Volume:
+  - Propagate the surface displacement with inverse-distance weighting (IDW; Luke, Collins &
+    Blades 2012). IDW is linear in the surface displacement.
+  - For larger twist, interpolate the rotation as well as the translation (same paper).
+  - Symmetry-plane nodes keep their normal coordinate. Far-field nodes stay fixed.
+- Cost: IDW is O(N_vol × N_surf). Use a reduced, greedy-selected surface point set and one Warp
+  kernel per sub-block, with FP64 coordinates.
+- Tool:
+  - A CLI command `python -m wmles_wrap deform case.yaml` writes the flight-shape Plot3D/CGNS grid.
+    It is an offline step, like `extrude`.
+  - Alternatively, `grid.deform` applies it at setup, before the metrics.
+- Quality checks:
+  - Positive cell volumes and the minimum Jacobian ratio, from `compute_metrics`
+    ([grid/metrics.py](../src/wmles_wrap/grid/metrics.py)).
+  - Interfaces stay point-matched, so connectivity detection still succeeds on the deformed grid.
+- Verify:
+  - A rigid rotation and translation of the whole grid is reproduced exactly.
+  - Analytic twist and bending on a straight rectangular wing: the sections match the prescribed
+    θ and w.
+  - CRM: deform the DPW jig grid with the DPW-6 measured twist and bending at each α, and compare
+    the surface with the deformed geometry supplied by DPW-6.
+
+**Step 2: general surface → volume operator for R9**
+- The same IDW, as a Warp function of the surface displacement.
+- Its transpose comes from `wp.Tape` or is written explicitly, and is checked with a dot-product test.
+- Later, an FFD or Hicks–Henne surface parametrization feeds it.
+
+**Later (optional):** static aeroelastic coupling, where twist and bending come from a beam model
+loaded by the RANS surface forces.
+
+### R9: discrete adjoint and shape gradients (target)
 
 **Assessment**
 - Building gradient-based optimization now would be too ambitious.
@@ -241,8 +324,8 @@ fixed-point structure as the primal, in mixed precision:
    - A test checks this with Warp's `verify_autograd_array_access`.
 2. **Metrics are a differentiable Warp function of the node coordinates.**
    - No host-side numpy steps between X and R.
-   - Mesh deformation (surface → volume) comes later. It is linear (inverse-distance weighting or
-     RBF), so it can be transposed.
+   - Mesh deformation (surface → volume) is R8. It is linear (inverse-distance weighting), so it
+     can be transposed.
 3. **Wall distance:** the BVH only selects the closest face. The FP64 point-to-triangle kernel is
    differentiable, so frozen-face d(X) has a gradient.
 4. **No data-dependent iteration inside the residual.**
@@ -267,23 +350,42 @@ fixed-point structure as the primal, in mixed precision:
    - A dot-product test ⟨v, J u⟩ = ⟨Jᵀv, u⟩ on small grids in FP64.
    - A comparison of tape vector–Jacobian products with central finite differences.
 
-**Scope of R8 (after R5)**
+**Scope of R9 (after R5 and R8)**
 - The adjoint solver.
 - dC_D/dX_surface checked against finite differences on the NACA 0012 and on the CRM wing.
 - Later: FFD or Hicks–Henne parametrization and coupling to an optimizer (SciPy SLSQP).
 - Adjoint memory is about 2–3× the residual working set, because the tape stores the residual
   intermediates. That roughly halves the maximum grid size per GPU.
 
+### R10: chimera grids
+
+- Overlapping structured component grids (wing, fuselage, horizontal tail) replace a single
+  point-matched multiblock grid, so the tail and other components can be meshed independently.
+- Hole cutting against the component surfaces reuses the `wp.Mesh` BVH from the wall-distance
+  section. It is followed by a fringe/donor search and trilinear interpolation of the fringe cells.
+- Fringe interpolation fits the halo structure. It uses explicit donor-stencil lists that are
+  exchanged like the halo maps, so it stays transposable for the adjoint and works across devices.
+- Implicit solver: fringe cells are frozen (Dirichlet) in the line solves, and lines stop at
+  blanked cells.
+- Wall distance and forces must handle overlapping surfaces. A zipper grid or weighted surface
+  integration keeps overlapped walls from being counted twice.
+- Verify:
+  - Overset vs point-matched results on the same 2D case (e.g. the NACA 0012 with an overset
+    background grid).
+  - Then the CRM wing-body-tail (DPW-4 WBT0 configuration).
+
 ## Test grids
 
 The NASA Turbulence Modeling Resource (TMR) and DPW grids are downloaded by the user. The TMR grids
-are 2D Plot3D and run quasi-2D through `grid.extrude` (one cell in z, periodic). Large files are
-git-ignored.
+are formatted Plot3D, 3D with two planes in i (one cell thick), plus a neutral map file (`.nmf`)
+with the BCs. Grid files (`*.p3dfmt`) are git-ignored. The `.nmf` files and the SA reference data
+(`*.dat`) are committed.
 
-| Case | Directory | Grid sizes | Reference data |
+| Case | Directory | Grid sizes (downloaded) | Reference data |
 |---|---|---|---|
-| Flat plate | `cases/tmr/flatplate/` | 35×25, 69×49, 137×97, 273×193, 545×385 | CFL3D/FUN3D SA Cf |
-| Bump-in-channel | `cases/tmr/bump/` | 89×41, 177×81, 353×161, 705×321 (1409×641 optional) | Cp, Cf on the bump |
+| 2DZP flat plate | `cases/tmr/2DZP/` | 35×25, 69×49, 137×97, 273×193 (545×385 not downloaded) | C_f at x = 0.97, C_D |
+| 2DCJ coflowing jet | `cases/tmr/2DCJ/` | 3 blocks, 4 levels: 9×17 ×2 + 33×33 up to 65×129 ×2 + 257×257 (finest 129×257 ×2 + 513×513 not downloaded) | Plate C_D, u at three x-stations, u(x) at y = 0 |
+| 2DB bump-in-channel | `cases/tmr/2DB/` | 89×41, 177×81, 353×161 (705×321, 1409×641 not downloaded) | C_f at x = 0.75; Cp, C_f on the bump |
 | NACA 0012 | `cases/tmr/naca0012/` | 113×33, 225×65, 449×129, 897×257 (1793×513 optional) | C_L, C_D, Cp at α = 0°, 10°, 15° |
 | CRM wing-body | `cases/crm/` | DPW-5 common structured family | DPW-5/6 SA results, NTF/Ames data |
 

@@ -19,7 +19,7 @@ transonic buffet on the NASA Common Research Model (CRM).
 | 2 | SGS and compressible turbulence | done on CPU; converged runs need the GPU node | `c1e232e` |
 | 3 | Wall-model validation | in progress: models and channel at Re_τ = 5200 done; A-airfoil set up | `main` `3077414` |
 | 4 | CGNS, OAT15A buffet, CRM | not started | — |
-| R | RANS-SA (steady RANS, URANS, DDES, adjoint target) | planned, see [plan_rans.md](plan_rans.md) | — |
+| R | RANS-SA (steady RANS, URANS, DDES, mesh deformation, adjoint target, chimera) | planned, see [plan_rans.md](plan_rans.md) | — |
 
 ## Environment and design drivers
 

@@ -1,7 +1,8 @@
 # NASA TMR 2D zero-pressure-gradient flat plate (VERIF/2DZP) with the negative SA model (RANS R2).
 # M = 0.2, Re = 5e6 per unit length, T = 540 R (300 K), nut_inf = 3 nu_inf. Grid study and comparison with the
 # CFL3D/FUN3D results: verification/sa_flatplate.py. Grid files (*.p3dfmt) are git-ignored (download from TMR).
-# The TMR total-pressure inflow / back-pressure outflow map onto the simpler inflow/outflow BCs here.
+# TMR BCs: inflow p0/p_inf = 1.02828, T0/T_inf = 1.008 (inflow_total, defaults = free-stream totals),
+# back pressure p/p_inf = 1 (outflow), Riemann far field on top.
 grid:
   file: flatplate_clust2_3levelsdown_69x49.p3dfmt
   format: plot3d
@@ -20,7 +21,7 @@ rans: {turbulence: sa, max_iterations: 1000, tolerance: 1.0e-10}
 boundaries:
   - {patches: [viscous_solid], type: wall, thermal: adiabatic}
   - {patches: [symmetry_y_strong, symmetry_z_strong], type: slip}
-  - {patches: [subsonic_inflow_pt], type: inflow}
+  - {patches: [subsonic_inflow_pt], type: inflow_total}
   - {patches: [back_pressure], type: outflow}
   - {patches: [farfield_riem], type: farfield}
 

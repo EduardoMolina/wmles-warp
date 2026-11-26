@@ -66,17 +66,21 @@ At 64³ the curves move toward the DNS, but none has converged: all peak about 1
 | Steady MMS, Roe-MUSCL + negative SA (μ_t in the mean flow, analytic wall distance), reoriented 2-block grid, 3 partitions | `sa_mms.py` | L2 order, n = 8/16/32: mean flow 2.06–2.50, ν̃ 0.95–0.96 (first-order upwind convection, as designed); each grid converged in ≤ 91 iterations |
 | Laminar flat plate, Re = 1e5 per unit length, TMR 2DZP grids | `tests/test_sa.py::test_blasius` | C_f/C_f,Blasius within 2.6 % (69×49) and 1.3 % (137×97) for 0.1 < x < 1.6; converged to 1e-11 in 164–214 iterations |
 | TMR 2DZP flat plate, SA, M = 0.2, Re = 5e6 | `sa_flatplate.py` | see below |
+| TMR open BCs: inflow_total (p0, T0, direction, R+), back pressure; linearized ghosts vs FD Jacobian; wall data | `tests/test_open_bcs.py` | conditions to 1e-12; boundary blocks within 6 % of FD (85 % with frozen ghosts) |
 
-TMR 2DZP with SA (C_f from the first wall cell, C_D = ½∫₀² C_f dx), each grid converged to a 1e-10 residual drop:
+TMR 2DZP with SA, TMR boundary conditions (inflow_total: p0/p∞ = 1.02828, T0/T∞ = 1.008; back
+pressure p/p∞ = 1; Riemann far field), C_f from the two-cell wall derivative (`post/surface.py`),
+C_D = ½∫₀² C_f dx, each grid converged to a 1e-10 residual drop (545×385 from the CGNS file):
 
 | N cells | iterations | C_f(0.97) | CFL3D | FUN3D | C_D | CFL3D | FUN3D |
 |---|---|---|---|---|---|---|---|
-| 816 | 503 | 2.7846e-3 | 2.7957e-3 | 2.6674e-3 | 2.9550e-3 | 2.9544e-3 | 2.7739e-3 |
-| 3 264 | 219 | 2.7372e-3 | 2.7284e-3 | 2.6950e-3 | 2.9033e-3 | 2.8844e-3 | 2.8226e-3 |
-| 13 056 | 183 | 2.7258e-3 | 2.7112e-3 | 2.7022e-3 | 2.8875e-3 | 2.8662e-3 | 2.8400e-3 |
-| 52 224 | 167 | 2.7236e-3 | 2.7067e-3 | 2.7045e-3 | 2.8823e-3 | 2.8613e-3 | 2.8479e-3 |
+| 816 | 539 | 2.7664e-3 | 2.7957e-3 | 2.6674e-3 | 2.9409e-3 | 2.9544e-3 | 2.7739e-3 |
+| 3 264 | 229 | 2.7189e-3 | 2.7284e-3 | 2.6950e-3 | 2.8863e-3 | 2.8844e-3 | 2.8226e-3 |
+| 13 056 | 251 | 2.7075e-3 | 2.7112e-3 | 2.7022e-3 | 2.8693e-3 | 2.8662e-3 | 2.8400e-3 |
+| 52 224 | 361 | 2.7052e-3 | 2.7067e-3 | 2.7045e-3 | 2.8635e-3 | 2.8613e-3 | 2.8479e-3 |
+| 208 896 | 575 | 2.7049e-3 | 2.7056e-3 | 2.7054e-3 | 2.8611e-3 | 2.8599e-3 | 2.8525e-3 |
 
-Second-order grid convergence, to about 2.723e-3 (C_f) and 2.880e-3 (C_D): 0.65–0.85 % above the TMR
-fine-grid values (2.7055e-3, 2.856e-3), where CFL3D and FUN3D agree to 0.01 %. Open for R3: the TMR
-total-pressure inflow and back-pressure outflow (here simplified inflow/outflow BCs) and the wall-shear
-evaluation.
+On the finest grid C_f is within 0.03 % of CFL3D and FUN3D and C_D within 0.04 % of CFL3D. With the
+earlier simplified inflow (ρ, u fixed, p extrapolated) the results were 0.65 % high: the boundary-layer
+displacement raised the inflow pressure by 1.9e-4 p∞, which a total-pressure inflow turns into a 0.34 %
+lower edge velocity. The wall-shear order (first cell vs two cells) changes C_f by < 0.1 %.

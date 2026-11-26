@@ -10,6 +10,7 @@ import pytest
 
 from wmles_wrap.config import ConfigError, config_from_dict, load_config
 from wmles_wrap.io.plot3d import write_plot3d
+from wmles_wrap.post.surface import wall_data
 from wmles_wrap.solver import Solver
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +29,7 @@ def _tmr_plate(tmp_path, grid, reynolds, turbulence, partitions=1, rans=None):
         "rans": {"turbulence": turbulence, "max_iterations": 800, "tolerance": 1e-10, **(rans or {})},
         "boundaries": [{"patches": ["viscous_solid"], "type": "wall"},
                        {"patches": ["symmetry_y_strong", "symmetry_z_strong"], "type": "slip"},
-                       {"patches": ["subsonic_inflow_pt"], "type": "inflow"},
+                       {"patches": ["subsonic_inflow_pt"], "type": "inflow_total"},
                        {"patches": ["back_pressure"], "type": "outflow"},
                        {"patches": ["farfield_riem"], "type": "farfield"}],
         "run": {"log_every": 10**6}, "output": {"dir": str(tmp_path / "out")},
@@ -36,14 +37,9 @@ def _tmr_plate(tmp_path, grid, reynolds, turbulence, partitions=1, rans=None):
 
 
 def _wall_cf(s, b=1):
-    """Skin friction from the first wall cell (2 mu u_1 / z_1) and face-centroid x on kmin of block b."""
-    x = s.parent_blocks[b]
-    W = s.gas.primitives(s.parent_states()[b][:, :, 0])
-    fc = 0.25 * (x[:-1, :-1, 0] + x[1:, :-1, 0] + x[:-1, 1:, 0] + x[1:, 1:, 0])
-    cell = 0.125 * sum(x[i:x.shape[0] - 1 + i, j:x.shape[1] - 1 + j, k:k + 1]
-                       for i in (0, 1) for j in (0, 1) for k in (0, 1))[:, :, 0]
-    cf = 2 * s.gas.mu(W["T"]) * W["u"] / (cell[..., 2] - fc[..., 2])
-    return fc[0, :, 0], cf[0]
+    """Skin friction (two-cell wall derivative) and face-centroid x on the plate (kmin of block b)."""
+    wd = wall_data(s)[(b, 4)]
+    return wd.xf[0, :, 0], wd.cf[0]
 
 
 def test_sa_manufactured_solution_orders():
@@ -83,13 +79,14 @@ def test_blasius(tmp_path):
 
 def test_sa_flat_plate(tmp_path):
     """TMR 2DZP, 35x25: converges to machine zero; C_f(0.97) between the CFL3D and FUN3D values
-    on the same grid (2.7957e-3, 2.6674e-3); the converged value is a regression reference."""
+    on the same grid (2.7957e-3, 2.6674e-3); the converged value is a regression reference (TMR
+    inflow_total BC, two-cell wall derivative)."""
     s = _tmr_plate(tmp_path, "flatplate_clust2_4levelsdown_35x25", 5e6, "sa")
     assert s.run_steady() and s.step < 700
     x, cf = _wall_cf(s)
     c97 = np.interp(0.970084071, x, cf)
     assert 2.6674e-3 < c97 < 2.7957e-3
-    assert c97 == pytest.approx(2.784632e-3, rel=1e-5)
+    assert c97 == pytest.approx(2.766426e-3, rel=1e-5)
     nut = s.turbulence.parent_nut()[1] / s.gas.mu(np.float64(1.0))
     assert 300 < nut.max() < 500  # nut / nu_inf in the boundary layer
 

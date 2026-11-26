@@ -370,7 +370,8 @@ def _validate(cfg: CaseConfig) -> None:
         raise ConfigError("flow.mach, flow.reynolds and flow.temperature must be positive")
     if cfg.numerics.ghost_layers < 2:
         raise ConfigError("numerics.ghost_layers must be >= 2")
-    bc_types = ("wall", "wall_modeled", "slip", "farfield", "inflow", "outflow", "extrapolate", "dirichlet")
+    bc_types = ("wall", "wall_modeled", "slip", "farfield", "inflow", "inflow_total", "outflow", "extrapolate",
+                "dirichlet")
     for i, b in enumerate(cfg.boundaries):
         choice(b.type, bc_types, f"boundaries[{i}].type")
         if not b.faces and not b.patches:

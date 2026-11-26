@@ -22,7 +22,7 @@ LES roadmap is in [plan.md](plan.md), and code conventions are in [CLAUDE.md](..
 | R0 | Prerequisites: grid input (CGNS, NMF, formatted Plot3D), FP64 metrics, GPU wall distance, line-aware partitioner, mixed-precision kernels | done (branch `rans-r0`) |
 | R1 | Pseudo-time implicit core (mixed-precision defect correction, line relaxation) | done (laminar; branch `rans-r0`) |
 | R2 | Dissipative steady residual, then the SA model (negative-SA) | done (branch `rans-r2`) |
-| R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | not started; 2DZP/2DCJ/2DB grids and SA data in `cases/tmr/` |
+| R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | in progress (branch `rans-r3`): TMR open BCs, 2DZP done; 2DB running |
 | R4 | Acceleration: FGMRES and/or FAS multigrid | not started |
 | R5 | Production steady RANS: NASA CRM (DPW-5/6) | not started |
 | R6 | Dual-time stepping (URANS) | not started |
@@ -255,9 +255,20 @@ one backward-Euler pseudo-time step, (V/Δτ − ∂R/∂Q) δQ = R, approximate
 
 ### R3: TMR verification
 
-First, from R2: the TMR total-pressure/total-temperature inflow and back-pressure outflow BCs
-(the 2DZP results are 0.65 % above TMR with the simplified inflow/outflow), and a second-order
-wall-shear evaluation.
+Done first (from R2):
+- **TMR open boundaries.** `inflow_total` (Carlson, NASA/TM-2011-217181): p0, T0 and flow direction
+  given (`params: p_total, T_total, direction`; default: free-stream totals), the outgoing Riemann
+  invariant from the interior. Back pressure is `outflow` (`params.p_ratio`, default 1). SA: ν̃∞ at
+  `inflow_total`. Their ghosts are linearized in the implicit operator (the far field stays
+  frozen). TMR values: 2DZP and 2DB p0/p_ref = 1.02828, T0/T_ref = 1.008; 2DCJ (M_ref = 0.5) inner
+  jet 1.1862 / 1.05, outer stream 1.046 / 1.0; all p/p_ref = 1 at the outflow.
+- **Wall data** (`post/surface.py`): p_w, τ_w, C_p, C_f, forces on no-slip walls, with a two-cell
+  (second-order) wall-normal derivative.
+- **2DZP result:** within 0.03 % of CFL3D/FUN3D for C_f(0.97) on the 545×385 grid, 0.04 % for C_D
+  (table in verification/README.md). The 0.65 % gap came from the simplified inflow, not from the
+  wall-shear evaluation (< 0.1 %).
+- Fine grids converge more slowly with the total-pressure inflow (2DZP 273×193: 361 iterations vs 167);
+  the extra iterations come from a 10⁻⁶–10⁻⁷ phase, not from the inflow linearization. For R4.
 
 These three NASA TMR verification cases are the turbulence-model verification set. Each is
 compared with the CFL3D/FUN3D SA results on the same grid family, using the grid-convergence plots

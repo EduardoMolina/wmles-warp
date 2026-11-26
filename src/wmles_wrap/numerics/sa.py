@@ -33,7 +33,8 @@ import numpy as np
 import warp as wp
 
 from ..precision import MixedPrecision, kernel_factory
-from .kernels import (BC_DIRICHLET, BC_EXTRAPOLATE, BC_FARFIELD, BC_INFLOW, BC_OUTFLOW, BC_SLIP,
+from .kernels import (BC_DIRICHLET, BC_EXTRAPOLATE, BC_FARFIELD, BC_INFLOW, BC_INFLOW_TOTAL, BC_OUTFLOW,
+                      BC_SLIP,
                       BC_WALL_ADIABATIC, BC_WALL_ISOTHERMAL, make_kernels)
 
 # model constants
@@ -81,7 +82,7 @@ def sa_kernels(mp: MixedPrecision):
     tiny = rs(1e-30)
     wall_a, wall_i, slip = BC_WALL_ADIABATIC, BC_WALL_ISOTHERMAL, BC_SLIP
     farfield, inflow, dirichlet = BC_FARFIELD, BC_INFLOW, BC_DIRICHLET
-    extrap, outflow = BC_EXTRAPOLATE, BC_OUTFLOW
+    extrap, outflow, inflow_t = BC_EXTRAPOLATE, BC_OUTFLOW, BC_INFLOW_TOTAL
 
     @wp.func
     def visc(T: rs, p: Params):
@@ -191,7 +192,7 @@ def sa_kernels(mp: MixedPrecision):
             b = -one
         elif code == slip or code == extrap or code == outflow:
             b = one
-        elif code == farfield or code == inflow:
+        elif code == farfield or code == inflow or code == inflow_t:
             un = wp.dot(rv3(Wi[1], Wi[2], Wi[3]), S / wp.length(S))
             b = half * (one + wp.tanh(un / (smooth_bc * wp.sqrt(p.gamma * Wi[4] / Wi[0]))))
         return b
@@ -233,7 +234,7 @@ def sa_kernels(mp: MixedPrecision):
                 v = nut[ii[0], ii[1], ii[2]]
             elif code == dirichlet:
                 v = nut_inf
-            elif code == farfield or code == inflow:
+            elif code == farfield or code == inflow or code == inflow_t:
                 v = wgt * n1 + (one - wgt) * nut_inf
             nut[gi[0], gi[1], gi[2]] = v
 

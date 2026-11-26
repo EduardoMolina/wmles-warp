@@ -34,6 +34,7 @@ BC_EXTRAPOLATE = 4
 BC_INFLOW = 5
 BC_OUTFLOW = 6
 BC_DIRICHLET = 7  # filled on the host (verification)
+BC_INFLOW_TOTAL = 8  # subsonic inflow: total pressure, total temperature and flow direction
 
 DISS_NONE, DISS_RUSANOV, DISS_ROE = 0, 1, 2
 SGS_NONE, SGS_VREMAN, SGS_WALE, SGS_SMAGORINSKY = 0, 1, 2, 3
@@ -330,6 +331,24 @@ def make_kernels(prec: Precision):
             a_o = wp.sqrt(p.gamma * p.w_inf[4] / p.w_inf[0])
             if wp.abs(wp.dot(velocity(p.w_inf), nrm)) > a_o:
                 Wb = p.w_inf
+        elif bctype == 8:
+            # subsonic inflow, total conditions (Carlson, NASA/TM-2011-217181): p0 = p_exit,
+            # T0 = t_wall, flow direction d = u_wall; the outgoing Riemann invariant
+            # R+ = u_n + 2a/(gamma-1) comes from the interior, and a_b solves
+            # a_b^2 + (gamma-1)/2 q^2 = a0^2 with u_n,b = q (d.n) = R+ - 2 a_b/(gamma-1)
+            g1 = p.gamma - one
+            cth = wp.min(wp.dot(u_wall, nrm), -tenth)  # d.n (n outward), kept away from tangential
+            a_i = wp.sqrt(p.gamma * W1[4] / W1[0])
+            rp = wp.dot(velocity(W1), nrm) + two * a_i / g1
+            a02 = p.gamma * p.R * t_wall
+            qa = cth * cth + two / g1
+            qc = half * g1 * rp * rp - a02 * cth * cth
+            a_b = (rp + wp.sqrt(wp.max(rp * rp - qa * qc, zero))) / qa
+            q = wp.max((rp - two * a_b / g1) / cth, zero)
+            q = wp.min(q, wp.sqrt(a02 / (half * g1 + one)))  # at most sonic
+            T_b = t_wall - half * q * q / p.cp
+            p_b = p_exit * wp.pow(T_b / t_wall, p.gamma / g1)
+            Wb = vec5(p_b / (p.R * T_b), q * u_wall[0], q * u_wall[1], q * u_wall[2], p_b)
         elif bctype == 6:  # outflow: p imposed unless supersonic
             a_i = wp.sqrt(p.gamma * W1[4] / W1[0])
             if wp.dot(velocity(W1), nrm) < a_i:

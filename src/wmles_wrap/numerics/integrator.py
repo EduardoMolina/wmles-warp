@@ -21,6 +21,7 @@ from .kernels import (
     BC_EXTRAPOLATE,
     BC_FARFIELD,
     BC_INFLOW,
+    BC_INFLOW_TOTAL,
     BC_OUTFLOW,
     BC_SLIP,
     BC_WALL_ADIABATIC,
@@ -62,9 +63,23 @@ def bc_code(bc, wall_model: str = "none") -> int:
         "farfield": BC_FARFIELD,
         "extrapolate": BC_EXTRAPOLATE,
         "inflow": BC_INFLOW,
+        "inflow_total": BC_INFLOW_TOTAL,
         "outflow": BC_OUTFLOW,
         "dirichlet": BC_DIRICHLET,
     }[bc.type]
+
+
+def inflow_total_state(bc, gas, flow) -> tuple[float, float, tuple]:
+    """(p0, T0, unit flow direction) of an inflow_total boundary, nondimensional. params:
+    p_total = p0/p_ref and T_total = T0/T_ref (default: free-stream totals), direction (default:
+    free-stream direction)."""
+    rho, u, v, w, T = gas.freestream(flow.alpha, flow.beta)
+    q2 = u * u + v * v + w * w
+    T0 = float(bc.params.get("T_total", T + 0.5 * q2 / gas.cp))
+    p0_inf = rho * gas.R * T * (1.0 + 0.5 * q2 / (gas.cp * T)) ** (gas.gamma / (gas.gamma - 1.0))
+    p0 = float(bc.params["p_total"]) * gas.R if "p_total" in bc.params else p0_inf
+    d = np.asarray(bc.params.get("direction", (u, v, w)), dtype=np.float64)
+    return p0, T0, tuple(float(x) for x in d / np.linalg.norm(d))
 
 
 @dataclass
@@ -225,8 +240,11 @@ class Integrator:
                     z(tdims, prec.vec3), z(tdims, prec.scalar), z(tdims, prec.scalar))
             tdims = tuple(pad[a] for a in range(3) if a != ax)
             u_wall = tuple(float(x) for x in bc.params.get("u_wall", (0.0, 0.0, 0.0)))
-            p_exit = float(bc.params.get("p_exit", self.s.gas.R))  # default: free-stream p (rho=T=1)
-            d.bcs.append(_BCLaunch(ax, side, code, float(bc.T_wall or 1.0), u_wall, p_exit, tdims))
+            p_exit = float(bc.params.get("p_ratio", 1.0)) * self.s.gas.R  # default: free-stream p (rho=T=1)
+            t_wall = float(bc.T_wall or 1.0)
+            if code == BC_INFLOW_TOTAL:  # kernel arguments: p_exit = p0, t_wall = T0, u_wall = direction
+                p_exit, t_wall, u_wall = inflow_total_state(bc, self.s.gas, self.s.cfg.flow)
+            d.bcs.append(_BCLaunch(ax, side, code, t_wall, u_wall, p_exit, tdims))
             if bc.type in NO_DISSIPATION_BCS:
                 d.nodiss[ax][side] = 1
             if code == BC_DIRICHLET:

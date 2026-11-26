@@ -3,8 +3,8 @@
 # symmetry run-in from x = -0.33333; far field at z = 1. The grids are 3D, one cell thick in i (y), with BC
 # patches in the neutral map file; the wall patch splits the block at the leading edge.
 # Grid files (*.p3dfmt, *.cgns) are not in git: download them from the TMR site into this folder.
-# This case only exercises the grid input and BC mapping (wmles_wrap info). The TMR inflow (total pressure)
-# and outflow (back pressure) BCs map onto the simpler inflow/outflow BCs, and the RANS-SA run comes in R2/R3.
+# This case only exercises the grid input and BC mapping (wmles_wrap info); the RANS-SA run is case_sa.yaml.
+# TMR inflow (total pressure/temperature) -> inflow_total, back pressure -> outflow.
 grid:
   file: flatplate_clust2_4levelsdown_35x25.p3dfmt
   format: plot3d
@@ -30,7 +30,7 @@ wall_model: {type: none}
 boundaries:
   - {patches: [viscous_solid], type: wall, thermal: adiabatic}
   - {patches: [symmetry_y_strong, symmetry_z_strong], type: slip}
-  - {patches: [subsonic_inflow_pt], type: inflow}
+  - {patches: [subsonic_inflow_pt], type: inflow_total}
   - {patches: [back_pressure], type: outflow}
   - {patches: [farfield_riem], type: farfield}
 

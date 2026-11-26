@@ -59,7 +59,8 @@ import warp as wp
 from ..grid.block import face_axis
 from ..precision import MixedPrecision, get_mixed, kernel_factory
 from .integrator import bc_code
-from .kernels import BC_SLIP, BC_WALL_ADIABATIC, BC_WALL_ISOTHERMAL, make_kernels
+from .kernels import (BC_INFLOW_TOTAL, BC_OUTFLOW, BC_SLIP, BC_WALL_ADIABATIC, BC_WALL_ISOTHERMAL,
+                      make_kernels)
 from .mixed import block_kernels, mixed_kernels
 
 log = logging.getLogger("wmles_wrap")
@@ -78,6 +79,7 @@ def implicit_kernels(mp: MixedPrecision):
     r_one = rs(1.0)
     r_half = rs(0.5)
     wall_a, wall_i, slip = BC_WALL_ADIABATIC, BC_WALL_ISOTHERMAL, BC_SLIP
+    outflow, inflow_t = BC_OUTFLOW, BC_INFLOW_TOTAL
 
     @wp.func
     def to_s5(W: rv5):
@@ -335,6 +337,41 @@ def implicit_kernels(mp: MixedPrecision):
         return dU_dW(Wg, g) * Mw * dW_dU(Wi, g)
 
     @wp.func
+    def open_ghost(code: int, S: v3, Wi: v5, Wg: v5, p: Params):
+        """B with ghost dQ = B dQ_i for the outflow and inflow_total ghosts (k_bc), S outward.
+        Outflow: rho, u from the interior, p fixed (subsonic). inflow_total: the ghost is a function
+        of R+ = u_n + 2a/(gamma-1) of the first cell only, B = dW_g/dR+ (x) dR+/dW_i."""
+        g = s(p.gamma)
+        g1 = g - one
+        Rg = s(p.R)
+        n = S / wp.length(S)
+        Mw = wp.identity(n=5, dtype=s)
+        if code == outflow:
+            if wp.dot(v3(Wi[1], Wi[2], Wi[3]), n) < wp.sqrt(g * Wi[4] / Wi[0]):
+                Mw[4, 4] = zero
+        else:
+            cp = g * Rg / g1
+            Tb = Wg[4] / (Wg[0] * Rg)
+            ug = v3(Wg[1], Wg[2], Wg[3])
+            q = wp.length(ug)
+            d = ug / wp.max(q, s(1e-30))
+            T0 = Tb + half * q * q / cp
+            c = wp.min(wp.dot(d, n), -s(0.1))
+            a_i = wp.sqrt(g * Wi[4] / Wi[0])
+            rp = wp.dot(v3(Wi[1], Wi[2], Wi[3]), n) + two * a_i / g1
+            qa = c * c + two / g1
+            qc = half * g1 * rp * rp - g * Rg * T0 * c * c
+            sq = wp.sqrt(wp.max(rp * rp - qa * qc, s(1e-30)))
+            da = (one + rp * (one - half * qa * g1) / sq) / qa
+            dq = (one - two * da / g1) / c
+            dT = -q * dq / cp
+            dp = Wg[4] * g / (g1 * Tb) * dT
+            col = v5(dp / (Rg * Tb) - Wg[0] * dT / Tb, dq * d[0], dq * d[1], dq * d[2], dp)
+            row = v5(-a_i / (g1 * Wi[0]), n[0], n[1], n[2], a_i / (g1 * Wi[4]))
+            Mw = wp.outer(col, row)
+        return dU_dW(Wg, g) * Mw * dW_dU(Wi, g)
+
+    @wp.func
     def cell(axis: int, n: int, t1: int, t2: int):
         if axis == 0:
             return wp.vec3i(n, t1, t2)
@@ -403,6 +440,9 @@ def implicit_kernels(mp: MixedPrecision):
                     Dm = Dm + half * jac_mat(Wj, S, g) * B + K * (dV_dU(Wi, p) - dV_dU(Wj, p) * B)
                 else:
                     Dm = Dm + diss_mat(Wi, Wj, S, jc, p) + K * dV_dU(Wi, p)
+                    if (not inside) and (code == outflow or code == inflow_t):
+                        # linearized open-boundary ghost (the far field stays frozen)
+                        Dm = Dm + off_mat(Wi, Wj, S, K, jc, p) * open_ghost(code, S, Wi, Wj, p)
                     if a == la and inside:
                         if side == 0:
                             lo_b = off_mat(Wi, Wj, S, K, jc, p)

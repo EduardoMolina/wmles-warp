@@ -173,6 +173,9 @@ class InitCfg:
 class ParallelCfg:
     devices: str | list[str] = "auto"
     partitions: int | str = "auto"
+    # never bisect a parent block along its line axis (wall-normal, else highest aspect ratio), so
+    # implicit line solves see whole lines (RANS); off for LES
+    keep_lines: bool = False
 
 
 @dataclass

@@ -24,7 +24,7 @@ from .grid.connectivity import (
     slice_padded_nodes,
 )
 from .grid.metrics import Metrics, compute_metrics
-from .grid.partition import assign_devices, split_blocks
+from .grid.partition import WALL_BC_TYPES, assign_devices, line_axes, split_blocks
 from .grid.patches import SplitGrid, split_at_patches, unsplit
 from .grid.wall_distance import WallDistance, compute_wall_distance
 from .io.cgns import read_cgns
@@ -109,7 +109,13 @@ class Solver:
         self.devices = resolve_devices(cfg.parallel.devices)
         self.peer = enable_peer_access(self.devices)
         nparts = resolve_partitions(cfg.parallel.partitions, self.devices)
-        self.subs: list[SubBlock] = split_blocks(self.parent_blocks, nparts, min_cells=max(4, self.ng))
+        self.line_axes: list[int] | None = None  # per parent block, with parallel.keep_lines
+        if cfg.parallel.keep_lines:
+            assign_boundary_conditions(parents, self.interfaces, cfg.boundaries, self.grid.labels)
+            walls = {(p.id, f) for p in parents for f, bc in p.face_bc.items() if bc.type in WALL_BC_TYPES}
+            self.line_axes = line_axes(self.parent_blocks, walls)
+        self.subs: list[SubBlock] = split_blocks(self.parent_blocks, nparts, min_cells=max(4, self.ng),
+                                                 keep_axes=self.line_axes)
         self.device_load = assign_devices(self.subs, self.devices)
         slice_padded_nodes(self.subs, parents, self.ng)
         assign_boundary_conditions(self.subs, self.interfaces, cfg.boundaries, self.grid.labels)
@@ -500,6 +506,8 @@ class Solver:
             bcs = {FACE_NAMES[f]: b.type for f, b in s.face_bc.items()}
             lines.append(f"  sub {s.id:3d} parent {s.parent} cells {s.nc} on {s.device} bc {bcs}")
         lines.append(f"device load      : {self.device_load}")
+        if self.cfg.parallel.keep_lines:
+            lines.append(f"line axes        : {['ijk'[a] for a in self.line_axes]} (kept whole by the partitioner)")
         nper = sum(1 for i in self.interfaces if i.periodic)
         lines.append(f"block interfaces : {len(self.interfaces)} one-sided ({nper} periodic)")
         gcl = max(m.gcl_max() for m in self.metrics.values())

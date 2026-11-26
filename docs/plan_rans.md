@@ -19,7 +19,7 @@ LES roadmap is in [plan.md](plan.md), and code conventions are in [CLAUDE.md](..
 
 | Stage | Content | Status |
 |---|---|---|
-| R0 | Prerequisites: grid input (CGNS, NMF, formatted Plot3D), FP64 metrics, GPU wall distance, line-aware partitioner | in progress: grid input, FP64 metrics, wall distance done |
+| R0 | Prerequisites: grid input (CGNS, NMF, formatted Plot3D), FP64 metrics, GPU wall distance, line-aware partitioner, mixed-precision kernels | done (branch `rans-r0`) |
 | R1 | Pseudo-time implicit core (mixed-precision defect correction, line relaxation) | not started |
 | R2 | SA model (negative-SA) | not started |
 | R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | not started; 2DZP/2DCJ/2DB grids and SA data in `cases/tmr/` |
@@ -80,6 +80,11 @@ Both GPUs run FP64 at 1/64 of the FP32 rate, which drives the mixed-precision de
      parent block along its line axis.
    - This keeps convergence and results independent of the partitioning, as the existing tests
      require.
+   - Done: `parallel.keep_lines: true` (default off, so LES partitioning is unchanged). The line
+     axis of a parent block is its wall-normal axis, or, without walls (wake, outer blocks), the
+     axis of the high-aspect-ratio cells; one-cell-thick axes are never line axes. Lines still
+     end at parent-block boundaries, including the cuts made by the patch splitting (e.g. the
+     2DCJ downstream block at k = 16); those do not depend on the partitioning.
 4. **Residual precision is a switch, and its cost is measured first.**
    - Estimated budget per outer step: 1 FP64 residual (~3–8 units), Jacobian assembly every 1–5
      steps (~2 units), and 5–10 sweeps (~1 unit each). The FP64 residual is then ~20–40 % of the
@@ -126,9 +131,16 @@ wall. [grid/wall_distance.py](../src/wmles_wrap/grid/wall_distance.py) uses Warp
 - **FP64 metric differencing (done):** face vectors, volumes and centroids are computed in FP64
   and stored in the run precision. On a 10⁻⁶ first cell 30 units from the origin, the FP32 volume
   error drops from 138 % (with zero volumes) to 4×10⁻⁸. Float64 runs are bitwise unchanged.
-- A line-axis constraint in the partitioner.
-- Mixed-precision kernel sets, using the existing `kernel_factory` cache in
-  [precision.py](../src/wmles_wrap/precision.py).
+- **Line-axis constraint in the partitioner (done):** `line_axes` and `split_blocks(keep_axes=...)`
+  in [grid/partition.py](../src/wmles_wrap/grid/partition.py), see design rule 3.
+- **Mixed-precision kernel sets (done):** `MixedPrecision` / `get_mixed(residual, solve)` in
+  [precision.py](../src/wmles_wrap/precision.py) (cached by `kernel_factory` like `Precision`;
+  `Precision.mat55` is the 5×5 block type), and [numerics/mixed.py](../src/wmles_wrap/numerics/mixed.py):
+  - `k_rhs` (rhs = −R, residual → solve precision) and `k_correct` (Q += δQ, solve → residual
+    precision) on the interior cells.
+  - `block_solve`, a 5×5 Gaussian elimination with partial pivoting: `wp.inverse` only goes up to
+    4×4, and the block-tridiagonal Thomas solve of R1 needs 5×5 diagonal-block solves.
+  - The `rans.residual_precision` option comes with the R1 solver.
 - **GPU wall distance (done, above).**
 - **Grid input with patch information (done, branch `rans-r0`):**
   - Structured CGNS reader [io/cgns.py](../src/wmles_wrap/io/cgns.py) for both storage formats:

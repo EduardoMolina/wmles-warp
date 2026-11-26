@@ -25,8 +25,7 @@ import numpy as np
 import warp as wp
 
 from ..precision import Precision, kernel_factory
-
-WALL_BC_TYPES = ("wall", "wall_modeled")
+from .partition import WALL_BC_TYPES
 NO_WALL_DISTANCE = 1.0e30  # stored where there is no wall surface at all
 EPS32 = float(np.finfo(np.float32).eps)
 

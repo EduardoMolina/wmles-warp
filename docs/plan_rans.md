@@ -22,7 +22,7 @@ LES roadmap is in [plan.md](plan.md), and code conventions are in [CLAUDE.md](..
 | R0 | Prerequisites: grid input (CGNS, NMF, formatted Plot3D), FP64 metrics, GPU wall distance, line-aware partitioner, mixed-precision kernels | done (branch `rans-r0`) |
 | R1 | Pseudo-time implicit core (mixed-precision defect correction, line relaxation) | done (laminar; branch `rans-r0`) |
 | R2 | Dissipative steady residual, then the SA model (negative-SA) | done (branch `rans-r2`) |
-| R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | in progress (branch `rans-r3`): TMR open BCs, 2DZP done; 2DB to 353×161 |
+| R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | in progress (branch `rans-r3`): TMR open BCs; 2DZP, 2DB, 2DCJ done (2DB ~0.5 % offsets open); NACA 0012 next |
 | R4 | Acceleration: FGMRES and/or FAS multigrid | not started |
 | R5 | Production steady RANS: NASA CRM (DPW-5/6) | not started |
 | R6 | Dual-time stepping (URANS) | not started |
@@ -280,6 +280,14 @@ Done first (from R2):
   145 s). A tighter `sweep_tolerance` (0.005) cuts iterations further (2DB 259, 2DZP 250) at the same
   wall time on CPU. The real fix for cells thin across the lines is R4 (Krylov on top of the line
   solves, or lines in both directions).
+- **2DB result** (705×321): C_f(0.75) within 0.1 % of CFL3D/FUN3D on the same grid; C_f(0.632)
+  and C_f(0.868) stay ~0.5 % low (Richardson −0.45 % / −0.5 % from the TMR fine-grid values).
+  Open; candidates are SA terms that only act with a pressure gradient (S̃ limiting, f_t2), the
+  C_f definition on the curved wall, and the van Albada limiter vs CFL3D's unlimited κ = 1/3 MUSCL.
+- **2DCJ result** (`verification/sa_jet.py`, 81 920 cells): centreline u within 0.001 a_ref of
+  CFL3D on every grid; plate C_D 1.0 % above CFL3D on the same grid (the codes differ by 1.8 %).
+  Two `inflow_total` streams per block (`boundaries[].block`), the zero-thickness plate and the
+  BVH wall distance near its trailing edge work as intended.
 
 These three NASA TMR verification cases are the turbulence-model verification set. Each is
 compared with the CFL3D/FUN3D SA results on the same grid family, using the grid-convergence plots

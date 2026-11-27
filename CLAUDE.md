@@ -8,7 +8,7 @@ Compressible wall-modeled LES solver: explicit, cell-centered, multiblock finite
 
 ## Environment and commands
 
-Always use the conda env `pyvista` (note: `conda run` neither forwards stdin nor streams stdout, so for long background runs call `/opt/miniconda3/envs/pyvista/bin/python` directly) (Warp, PyVista, PyYAML, SciPy, pytest, `plot3d`, `h5py` for CGNS/HDF5 installed; no mpi4py). The package is not installed; tests use `pythonpath = ["src"]`, CLI runs need `PYTHONPATH=src`.
+Always use the conda env `pyvista` (note: `conda run` neither forwards stdin nor streams stdout, so for long background runs call `/opt/miniconda3/envs/pyvista/bin/python` directly, under `caffeinate -i` so the Mac does not sleep mid-run) (Warp, PyVista, PyYAML, SciPy, pytest, `plot3d`, `h5py` for CGNS/HDF5 installed; no mpi4py). The package is not installed; tests use `pythonpath = ["src"]`, CLI runs need `PYTHONPATH=src`.
 
 ```bash
 conda run -n pyvista python -m pytest -q -p no:warnings                    # all tests
@@ -27,7 +27,8 @@ conda run -n pyvista env PYTHONPATH=src python verification/channel_profiles.py 
 PYTHONPATH=src python -m wmles_wrap run cases/a_airfoil/case.yaml   # GPU node: A-airfoil WMLES (36.7M cells)
 conda run -n pyvista env PYTHONPATH=src python verification/sa_mms.py --grids 8,16,32   # RANS-SA MMS orders
 conda run -n pyvista env PYTHONPATH=src python verification/sa_flatplate.py   # TMR 2DZP SA vs CFL3D/FUN3D (--levels 4,3,2,1,0)
-conda run -n pyvista env PYTHONPATH=src python verification/sa_bump.py        # TMR 2DB SA C_f vs CFL3D/FUN3D
+conda run -n pyvista env PYTHONPATH=src python verification/sa_bump.py        # TMR 2DB SA C_f vs CFL3D/FUN3D (--levels 4,3,2,1)
+conda run -n pyvista env PYTHONPATH=src python verification/sa_jet.py         # TMR 2DCJ SA C_D, centreline u (--levels 4,3,2,1)
 conda run -n pyvista env PYTHONPATH=src python -m wmles_wrap run cases/tmr/2DZP/case_sa.yaml
 conda run -n pyvista env PYTHONPATH=src python verification/airfoil_surface.py cases/a_airfoil/out/stats.npz \
     --case cases/a_airfoil/case.yaml --forces cases/a_airfoil/out/forces.dat --ref "surface data.dat" --plot

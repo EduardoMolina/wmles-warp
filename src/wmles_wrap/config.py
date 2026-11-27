@@ -193,8 +193,10 @@ class RansCfg:
     nut_inf_ratio: float = 3.0  # free-stream nu tilde / nu (NASA TMR: 3)
     smoother: str = "zebra"  # zebra (red-black line Gauss-Seidel) | line_jacobi
     # linear sweeps per outer iteration: stop when max|dQ_new - dQ_old| <= sweep_tolerance max|dQ|
-    # (max norms: independent of the partitioning), after min_sweeps and at most sweeps
-    sweeps: int = 32
+    # (max norms: independent of the partitioning), after min_sweeps and at most sweeps. The cap
+    # matters on fine grids whose outer cells are thin across the lines (TMR 2DB 353x161: 1457
+    # iterations with 32, 397 with 128); the tolerance test still stops early where it can.
+    sweeps: int = 128
     min_sweeps: int = 4
     sweep_tolerance: float = 0.02
     solve_precision: str = "float32"  # precision of the linear relaxation (Jacobian blocks, dQ)

@@ -22,7 +22,7 @@ LES roadmap is in [plan.md](plan.md), and code conventions are in [CLAUDE.md](..
 | R0 | Prerequisites: grid input (CGNS, NMF, formatted Plot3D), FP64 metrics, GPU wall distance, line-aware partitioner, mixed-precision kernels | done (branch `rans-r0`) |
 | R1 | Pseudo-time implicit core (mixed-precision defect correction, line relaxation) | done (laminar; branch `rans-r0`) |
 | R2 | Dissipative steady residual, then the SA model (negative-SA) | done (branch `rans-r2`) |
-| R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | in progress (branch `rans-r3`): TMR open BCs, 2DZP done; 2DB running |
+| R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | in progress (branch `rans-r3`): TMR open BCs, 2DZP done; 2DB to 353×161 |
 | R4 | Acceleration: FGMRES and/or FAS multigrid | not started |
 | R5 | Production steady RANS: NASA CRM (DPW-5/6) | not started |
 | R6 | Dual-time stepping (URANS) | not started |
@@ -244,7 +244,8 @@ one backward-Euler pseudo-time step, (V/Δτ − ∂R/∂Q) δQ = R, approximate
   - Second-order residuals respond more strongly than the first-order operator in some modes;
     exact linear solves then overshoot. `rans.implicit_dissipation: 1.25` (default) fixes it.
   - Fine grids need more linear sweeps: adaptive, until max|δQ_new − δQ_old| ≤ 0.02 max|δQ|
-    (`rans.sweep_tolerance`, max norms so the count is partition-independent), 4–32 sweeps.
+    (`rans.sweep_tolerance`, max norms so the count is partition-independent), 4–32 sweeps
+    (raised to 128 in R3, see the 2DB note there).
 - **Verification** ([verification/README.md](../verification/README.md)):
   - Steady MMS with SA (`verification/sa_mms.py`): mean flow order 2.1–2.5, ν̃ 0.96.
   - Laminar plate vs Blasius: 1.3 % on the 137×97 grid.
@@ -269,6 +270,16 @@ Done first (from R2):
   wall-shear evaluation (< 0.1 %).
 - Fine grids converge more slowly with the total-pressure inflow (2DZP 273×193: 361 iterations vs 167);
   the extra iterations come from a 10⁻⁶–10⁻⁷ phase, not from the inflow linearization. For R4.
+- **2DB convergence** (353×161 needed 1457 iterations, 177×81 only 251): the residual that
+  remains sits in the outer cells under the top symmetry plane above the bump, where the cells are
+  10–100× thinner in x than in z (dx/dz = 0.008–0.1) while the lines run in z. The x coupling then
+  rests on the Gauss–Seidel sweeps, and the adaptive sweep test (change between sweeps < 2 %)
+  stops at ~30 sweeps while that mode is still unconverged: a clean 0.9917-per-iteration tail.
+  Raising the cap `rans.sweeps` from 32 to 128 (new default): 397 iterations, 207 s instead of
+  720 s, same C_f to 6 digits; 2DZP unchanged or faster (273×193: 341 iterations, 125 s, vs 361,
+  145 s). A tighter `sweep_tolerance` (0.005) cuts iterations further (2DB 259, 2DZP 250) at the same
+  wall time on CPU. The real fix for cells thin across the lines is R4 (Krylov on top of the line
+  solves, or lines in both directions).
 
 These three NASA TMR verification cases are the turbulence-model verification set. Each is
 compared with the CFL3D/FUN3D SA results on the same grid family, using the grid-convergence plots

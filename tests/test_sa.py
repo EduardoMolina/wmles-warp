@@ -24,7 +24,7 @@ def _tmr_plate(tmp_path, grid, reynolds, turbulence, partitions=1, rans=None):
     return Solver(config_from_dict({
         "grid": {"file": f"{grid}.p3dfmt", "nmf": f"{grid}.nmf"},
         "flow": {"mach": 0.2, "reynolds": reynolds, "temperature": 300.0},
-        "sgs": {"model": "none"}, "wall_model": {"type": "none"}, "numerics": {"flux": "roe_muscl"},
+        "sgs": {"model": "none"}, "wall_model": {"type": "none"}, "numerics": {"flux": "roe_muscl", "limiter": "none"},
         "solver": {"mode": "rans"},
         "rans": {"turbulence": turbulence, "max_iterations": 800, "tolerance": 1e-10, **(rans or {})},
         "boundaries": [{"patches": ["viscous_solid"], "type": "wall"},
@@ -80,13 +80,13 @@ def test_blasius(tmp_path):
 def test_sa_flat_plate(tmp_path):
     """TMR 2DZP, 35x25: converges to machine zero; C_f(0.97) between the CFL3D and FUN3D values
     on the same grid (2.7957e-3, 2.6674e-3); the converged value is a regression reference (TMR
-    inflow_total BC, two-cell wall derivative)."""
+    inflow_total BC, unlimited kappa = 1/3 MUSCL, two-cell wall derivative)."""
     s = _tmr_plate(tmp_path, "flatplate_clust2_4levelsdown_35x25", 5e6, "sa")
     assert s.run_steady() and s.step < 700
     x, cf = _wall_cf(s)
     c97 = np.interp(0.970084071, x, cf)
     assert 2.6674e-3 < c97 < 2.7957e-3
-    assert c97 == pytest.approx(2.766426e-3, rel=1e-5)
+    assert c97 == pytest.approx(2.771848e-3, rel=1e-5)
     nut = s.turbulence.parent_nut()[1] / s.gas.mu(np.float64(1.0))
     assert 300 < nut.max() < 500  # nut / nu_inf in the boundary layer
 

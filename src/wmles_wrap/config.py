@@ -71,6 +71,11 @@ class NumericsCfg:
     precision: str = "float64"
     flux: str = "keep_pe"  # keep_pe (LES: + sensor-weighted dissipation) | roe_muscl (steady RANS)
     muscl_eps: float = 1.0e-3  # roe_muscl: van Albada regularization, relative to free-stream scales
+    # roe_muscl limiter: van_albada (smooth, kappa = 0) or none (unlimited kappa-scheme, as the TMR
+    # verification codes run subsonic cases: CFL3D kappa = 1/3); the limited scheme clips smooth peaks
+    # (NACA 0012 leading edge: +59 % pressure drag on family II.6)
+    limiter: str = "van_albada"
+    muscl_kappa: float = 1.0 / 3.0
     entropy_fix_linear: float = 0.0  # roe_muscl: Harten fix on the entropy/shear waves (fraction of a)
     sensor: str = "ducros_pressure"  # ducros_pressure | ducros | none
     dissipation: str = "roe"
@@ -352,6 +357,9 @@ def _validate(cfg: CaseConfig) -> None:
         raise ConfigError("grid.extrude cannot be combined with patch information (grid.nmf or cgns)")
     choice(cfg.numerics.precision, ("float32", "float64"), "numerics.precision")
     choice(cfg.numerics.flux, ("keep_pe", "roe_muscl"), "numerics.flux")
+    choice(cfg.numerics.limiter, ("van_albada", "none"), "numerics.limiter")
+    if not -1.0 <= cfg.numerics.muscl_kappa <= 1.0:
+        raise ConfigError("numerics.muscl_kappa must be in [-1, 1]")
     if cfg.numerics.muscl_eps <= 0 or cfg.numerics.entropy_fix_linear < 0:
         raise ConfigError("numerics.muscl_eps must be > 0 and numerics.entropy_fix_linear >= 0")
     choice(cfg.numerics.sensor, ("ducros_pressure", "ducros", "none"), "numerics.sensor")

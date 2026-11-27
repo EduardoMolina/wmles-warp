@@ -201,6 +201,8 @@ class Integrator:
         uref = max(float(np.sqrt(u * u + v * v + w * w)), a_inf)
         ref = (rho, uref, uref, uref, rho * gas.R * T)
         P.muscl_e = self.prec.vec5(*((num.muscl_eps * r) ** 2 for r in ref))
+        P.limiter = {"van_albada": 0, "none": 1}[num.limiter]
+        P.muscl_kappa = sc(num.muscl_kappa)
         P.fix_linear = sc(num.entropy_fix_linear)
         P.steady = 1 if cfg.solver.mode == "rans" else 0
         return P

@@ -59,6 +59,7 @@ def make_kernels(prec: Precision):
     zero = scalar(0.0)
     one = scalar(1.0)
     half = scalar(0.5)
+    quarter = scalar(0.25)
     two = scalar(2.0)
     two_thirds = scalar(2.0 / 3.0)
     four_thirds = scalar(4.0 / 3.0)
@@ -106,6 +107,8 @@ def make_kernels(prec: Precision):
         wm_iters_warm: int
         flux_type: int  # 0: KEEP-PE + sensor-weighted dissipation (LES), 1: Roe-MUSCL (steady RANS)
         muscl_e: vec5  # van Albada regularization (eps * reference)^2 per primitive variable
+        limiter: int  # roe_muscl: 0 van Albada (kappa = 0 average, limited), 1 none (unlimited kappa-scheme)
+        muscl_kappa: scalar  # unlimited kappa-scheme: 1/3 third-order upwind-biased (CFL3D), 0 Fromm, -1 upwind
         fix_linear: scalar  # Harten entropy fix on the entropy/shear waves (fraction of a), Roe-MUSCL
         steady: int  # 1: steady solver (solver.mode rans): smooth far-field inflow/outflow switch
 
@@ -203,8 +206,18 @@ def make_kernels(prec: Precision):
     def muscl(Wm: vec5, W0: vec5, Wp: vec5, sgn: scalar, p: Params) -> vec5:
         """Face state of cell W0 towards its neighbour Wp (sgn = +1) or Wm (sgn = -1)."""
         out = vec5()
-        for k in range(5):
-            out[k] = W0[k] + sgn * half * van_albada(W0[k] - Wm[k], Wp[k] - W0[k], p.muscl_e[k])
+        if p.limiter == 1:
+            # unlimited kappa-scheme: W0 + sgn/4 [(1 - kappa) (away from the face) + (1 + kappa) (towards it)]
+            for k in range(5):
+                fwd = Wp[k] - W0[k]
+                back = W0[k] - Wm[k]
+                if sgn < zero:
+                    fwd = W0[k] - Wm[k]
+                    back = Wp[k] - W0[k]
+                out[k] = W0[k] + sgn * quarter * ((one - p.muscl_kappa) * back + (one + p.muscl_kappa) * fwd)
+        else:
+            for k in range(5):
+                out[k] = W0[k] + sgn * half * van_albada(W0[k] - Wm[k], Wp[k] - W0[k], p.muscl_e[k])
         return out
 
     @wp.func

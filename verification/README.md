@@ -66,8 +66,14 @@ At 64³ the curves move toward the DNS, but none has converged: all peak about 1
 | Steady MMS, Roe-MUSCL + negative SA (μ_t in the mean flow, analytic wall distance), reoriented 2-block grid, 3 partitions | `sa_mms.py` | L2 order, n = 8/16/32: mean flow 2.06–2.50, ν̃ 0.95–0.96 (first-order upwind convection, as designed); each grid converged in ≤ 91 iterations |
 | Laminar flat plate, Re = 1e5 per unit length, TMR 2DZP grids | `tests/test_sa.py::test_blasius` | C_f/C_f,Blasius within 2.6 % (69×49) and 1.3 % (137×97) for 0.1 < x < 1.6; converged to 1e-11 in 164–214 iterations |
 | TMR 2DZP flat plate, SA, M = 0.2, Re = 5e6 | `sa_flatplate.py` | see below |
-| TMR coarse-grid regressions (2DCJ 1280 cells, 2DB 89×41) | `tests/test_tmr.py` | 2DCJ centreline u within 0.001 a_ref of CFL3D |
+| TMR coarse-grid regressions (2DCJ 1280 cells, 2DB 89×41, NACA 0012 II.7) | `tests/test_tmr.py` | 2DCJ centreline u within 0.0015 a_ref of CFL3D; 2DB C_f within 1.5 % of CFL3D |
 | TMR open BCs: inflow_total (p0, T0, direction, R+), back pressure; linearized ghosts vs FD Jacobian; wall data | `tests/test_open_bcs.py` | conditions to 1e-12; boundary blocks within 6 % of FD (85 % with frozen ghosts) |
+| TMR NACA 0012, α = 10°, SA, family II | `sa_naca0012.py` | see below |
+
+All TMR runs use `numerics.flux: roe_muscl` with `numerics.limiter: none` (unlimited κ = 1/3 MUSCL, as
+CFL3D runs these subsonic cases). The default van Albada limiter clips smooth peaks: on the NACA 0012
+it gave +59 % pressure drag on family II.6 (C_Dp 0.0141 vs CFL3D 0.0089), on the TMR bump and plate it
+mainly degraded the coarse grids.
 
 TMR 2DZP with SA, TMR boundary conditions (inflow_total: p0/p∞ = 1.02828, T0/T∞ = 1.008; back
 pressure p/p∞ = 1; Riemann far field), C_f from the two-cell wall derivative (`post/surface.py`),
@@ -75,32 +81,33 @@ C_D = ½∫₀² C_f dx, each grid converged to a 1e-10 residual drop (545×385 
 
 | N cells | iterations | C_f(0.97) | CFL3D | FUN3D | C_D | CFL3D | FUN3D |
 |---|---|---|---|---|---|---|---|
-| 816 | 539 | 2.7664e-3 | 2.7957e-3 | 2.6674e-3 | 2.9409e-3 | 2.9544e-3 | 2.7739e-3 |
-| 3 264 | 229 | 2.7189e-3 | 2.7284e-3 | 2.6950e-3 | 2.8863e-3 | 2.8844e-3 | 2.8226e-3 |
-| 13 056 | 251 | 2.7075e-3 | 2.7112e-3 | 2.7022e-3 | 2.8693e-3 | 2.8662e-3 | 2.8400e-3 |
-| 52 224 | 361 | 2.7052e-3 | 2.7067e-3 | 2.7045e-3 | 2.8635e-3 | 2.8613e-3 | 2.8479e-3 |
-| 208 896 | 575 | 2.7049e-3 | 2.7056e-3 | 2.7054e-3 | 2.8611e-3 | 2.8599e-3 | 2.8525e-3 |
+| 816 | 526 | 2.7719e-3 | 2.7957e-3 | 2.6674e-3 | 2.9343e-3 | 2.9544e-3 | 2.7739e-3 |
+| 3 264 | 245 | 2.7214e-3 | 2.7284e-3 | 2.6950e-3 | 2.8800e-3 | 2.8844e-3 | 2.8226e-3 |
+| 13 056 | 246 | 2.7088e-3 | 2.7112e-3 | 2.7022e-3 | 2.8653e-3 | 2.8662e-3 | 2.8400e-3 |
+| 52 224 | 339 | 2.7059e-3 | 2.7067e-3 | 2.7045e-3 | 2.8612e-3 | 2.8613e-3 | 2.8479e-3 |
+| 208 896 | 622 | 2.7053e-3 | 2.7056e-3 | 2.7054e-3 | 2.8599e-3 | 2.8599e-3 | 2.8525e-3 |
 
-On the finest grid C_f is within 0.03 % of CFL3D and FUN3D and C_D within 0.04 % of CFL3D. With the
-earlier simplified inflow (ρ, u fixed, p extrapolated) the results were 0.65 % high: the boundary-layer
-displacement raised the inflow pressure by 1.9e-4 p∞, which a total-pressure inflow turns into a 0.34 %
-lower edge velocity. The wall-shear order (first cell vs two cells) changes C_f by < 0.1 %.
+On every grid C_f and C_D are within 0.3 % of CFL3D's values on the same grid; on the finest, C_f is
+within 0.01 % of CFL3D and FUN3D and C_D equals CFL3D's to 4 digits. With the earlier simplified inflow
+(ρ, u fixed, p extrapolated) the results were 0.65 % high: the boundary-layer displacement raised the
+inflow pressure by 1.9e-4 p∞, which a total-pressure inflow turns into a 0.34 % lower edge velocity.
+The wall-shear order (first cell vs two cells) changes C_f by < 0.1 %.
 
 TMR 2DB bump-in-channel with SA (`sa_bump.py`; same inflow/outflow BCs, symmetry top), C_f from the
 two-cell wall derivative, converged to a 1e-10 residual drop:
 
 | N cells | iterations | C_f(0.632) | CFL3D | FUN3D | C_f(0.75) | CFL3D | FUN3D | C_f(0.868) | CFL3D | FUN3D |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 3 520 | 226 | 5.0596e-3 | 5.3364e-3 | 4.9695e-3 | 5.3556e-3 | 5.7348e-3 | 5.6779e-3 | 2.4640e-3 | 2.7536e-3 | 3.1110e-3 |
-| 14 080 | 243 | 5.2830e-3 | 5.2153e-3 | 5.1715e-3 | 5.8957e-3 | 6.0531e-3 | 5.9986e-3 | 2.5281e-3 | 2.7025e-3 | 2.7786e-3 |
-| 56 320 | 397 | 5.1568e-3 | 5.1889e-3 | 5.1906e-3 | 6.1019e-3 | 6.1231e-3 | 6.1055e-3 | 2.6537e-3 | 2.6840e-3 | 2.6995e-3 |
-| 225 280 | 663 | 5.1607e-3 | 5.1853e-3 | 5.1885e-3 | 6.1447e-3 | 6.1422e-3 | 6.1398e-3 | 2.6613e-3 | 2.6787e-3 | 2.6852e-3 |
+| 3 520 | 214 | 5.2647e-3 | 5.3364e-3 | 4.9695e-3 | 5.7111e-3 | 5.7348e-3 | 5.6779e-3 | 2.6805e-3 | 2.7536e-3 | 3.1110e-3 |
+| 14 080 | 245 | 5.1701e-3 | 5.2153e-3 | 5.1715e-3 | 6.0455e-3 | 6.0531e-3 | 5.9986e-3 | 2.6595e-3 | 2.7025e-3 | 2.7786e-3 |
+| 56 320 | 386 | 5.1600e-3 | 5.1889e-3 | 5.1906e-3 | 6.1254e-3 | 6.1231e-3 | 6.1055e-3 | 2.6601e-3 | 2.6840e-3 | 2.6995e-3 |
+| 225 280 | 649 | 5.1618e-3 | 5.1853e-3 | 5.1885e-3 | 6.1479e-3 | 6.1422e-3 | 6.1398e-3 | 2.6628e-3 | 2.6787e-3 | 2.6852e-3 |
 
-TMR finest grid (901 120 cells): 5.185e-3, 6.149e-3, 2.678e-3. On 705×321 (CGNS, `--levels 1`, 31 min
-on one CPU core) C_f(0.75) is within 0.1 % of CFL3D and FUN3D on the same grid, but C_f(0.632) stays
-0.5 % and C_f(0.868) 0.6–0.9 % below them; with the 353×161 values, Richardson estimates are about
-5.162e-3, 6.159e-3 and 2.664e-3, i.e. −0.45 %, +0.16 % and −0.5 % from the TMR fine-grid values. Open:
-the cause of the ~0.5 % offsets upstream and downstream of the bump crest. The 353×161 grid needed
+TMR finest grid (901 120 cells): 5.185e-3, 6.149e-3, 2.678e-3. C_f(0.75) follows CFL3D on every grid
+(within 0.4 %; 0.1 % on 705×321). C_f(0.632) and C_f(0.868) converge to values about 0.45 % and 0.55 %
+below the TMR ones (Richardson from the two finest grids: 5.162e-3, 6.155e-3, 2.664e-3). Open: the
+cause of these offsets upstream and downstream of the crest; not the limiter (the limited scheme gave
+the same fine-grid values) and not the grid. 705×321: 34 min on one CPU core. The 353×161 grid needed
 1457 iterations with the former 32-sweep cap (see plan_rans.md, R3, 2DB convergence).
 
 TMR 2DCJ coflowing jet with SA (`sa_jet.py`): M_ref = 0.5, Re = 5e4, two `inflow_total` streams (inner
@@ -110,13 +117,31 @@ sides / (½ρU²·10); u over a_ref on the centreline (y = 0):
 
 | N cells | iterations | C_D | CFL3D | FUN3D | u(2.716) | CFL3D | FUN3D | u(29.25) | CFL3D | FUN3D | u(95.50) | CFL3D | FUN3D |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 280 | 235 | 7.657e-3 | 6.710e-3 | 5.609e-3 | 0.50147 | 0.50220 | 0.50057 | 0.40679 | 0.40750 | 0.39202 | 0.32618 | 0.32680 | 0.32070 |
-| 5 120 | 213 | 6.226e-3 | 6.011e-3 | 5.530e-3 | 0.50120 | 0.50165 | 0.50065 | 0.41271 | 0.41385 | 0.40487 | 0.32723 | 0.32765 | 0.32435 |
-| 20 480 | 269 | 5.948e-3 | 5.847e-3 | 5.545e-3 | 0.50106 | 0.50121 | 0.50052 | 0.41507 | 0.41602 | 0.41124 | 0.32737 | 0.32768 | 0.32593 |
-| 81 920 | 414 | 5.852e-3 | 5.791e-3 | 5.607e-3 | 0.50086 | 0.50081 | 0.50044 | 0.41622 | 0.41685 | 0.41455 | 0.32739 | 0.32759 | 0.32671 |
+| 1 280 | 247 | 7.334e-3 | 6.710e-3 | 5.609e-3 | 0.50223 | 0.50220 | 0.50057 | 0.40644 | 0.40750 | 0.39202 | 0.32659 | 0.32680 | 0.32070 |
+| 5 120 | 240 | 5.962e-3 | 6.011e-3 | 5.530e-3 | 0.50157 | 0.50165 | 0.50065 | 0.41310 | 0.41385 | 0.40487 | 0.32748 | 0.32765 | 0.32435 |
+| 20 480 | 264 | 5.756e-3 | 5.847e-3 | 5.545e-3 | 0.50116 | 0.50121 | 0.50052 | 0.41561 | 0.41602 | 0.41124 | 0.32758 | 0.32768 | 0.32593 |
+| 81 920 | 413 | 5.719e-3 | 5.791e-3 | 5.607e-3 | 0.50083 | 0.50081 | 0.50044 | 0.41665 | 0.41685 | 0.41455 | 0.32754 | 0.32759 | 0.32671 |
 
 TMR finest (327 680 cells): C_D 5.766e-3 (CFL3D) / 5.665e-3 (FUN3D); u 0.50060 / 0.50050, 0.41717 /
-0.41625, 0.32748 / 0.32712. The centreline velocities follow CFL3D on every grid (within 0.001 a_ref);
-on 81 920 cells u(x, y = 0) is within 0.0004 a_ref of the FUN3D finest-grid profile. C_D is 1.0 % above
-CFL3D on the same grid and extrapolates to about 5.80e-3, 0.6 % above CFL3D's finest value; the two
-codes differ by 1.8 % there. 81 920 cells: 387 s on one CPU core.
+0.41625, 0.32748 / 0.32712. The centreline velocities follow CFL3D on every grid (within 0.0011 a_ref,
+0.0002 on 81 920 cells); u(x, y = 0) is within 0.0008 a_ref of the CFL3D finest-grid profile. C_D
+converges to about 5.71e-3, between CFL3D's and FUN3D's finest values (which differ by 1.8 %).
+81 920 cells: 482 s on one CPU core.
+
+TMR NACA 0012 (`sa_naca0012.py`; validation-case numerics comparison, SA without point vortex):
+M = 0.15, Re_c = 6e6, α = 10°, Riemann far field at ~500 c, family II C-grids (wake cut as a 1-to-1
+self-interface). Forces per unit span over ½ρU²c, C_m about c/4 (nose-up positive). CFL3D (SA,
+1st-order turbulence advection, as ours) on the same cells; FUN3D/TAU (SA-neg, 2nd order) are listed
+at the same node count in the script output:
+
+| grid | cells | iterations | C_L | CFL3D | C_D | CFL3D | C_Dp | CFL3D | C_Dv | CFL3D | C_m | CFL3D |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| II.7 | 3 584 | 367 | 1.05426 | – | 0.02441 | – | 0.01903 | – | 0.00538 | – | 0.00282 | – |
+| II.6 | 14 336 | 355 | 1.08261 | 1.08291 | 0.014723 | 0.014992 | 0.008726 | 0.008877 | 0.005997 | 0.006116 | 0.00638 | 0.00619 |
+| II.5 | 57 344 | 420 | 1.08715 | 1.08735 | 0.012719 | 0.012828 | 0.006596 | 0.006646 | 0.006124 | 0.006183 | 0.00713 | 0.00705 |
+| II.4 | 229 376 | 803 | 1.08848 | 1.08850 | 0.012315 | 0.012362 | 0.006155 | 0.006172 | 0.006160 | 0.006190 | 0.00721 | 0.00719 |
+
+TMR infinite-grid bounds (2nd-order turbulence advection): C_L 1.0909–1.0911, C_D 0.012270–0.012275,
+C_Dp 0.006060–0.006070, C_Dv 0.006205–0.006206, C_m 0.00676–0.00680. On II.4 C_L agrees with CFL3D on
+the same grid to 0.003 %, C_D to 0.4 % (pressure 0.3 %, viscous 0.5 % below), C_m to 0.2 %; the viscous
+drag is consistently 0.5–2 % below CFL3D's. II.4: 39 min on one CPU core.

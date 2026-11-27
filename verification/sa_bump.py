@@ -62,7 +62,7 @@ def run(level: int, partitions: int = 1, max_iterations: int = 1500):
     s = Solver(config_from_dict({
         "grid": gcfg,
         "flow": {"mach": 0.2, "reynolds": 3e6, "temperature": 300.0},
-        "sgs": {"model": "none"}, "wall_model": {"type": "none"}, "numerics": {"flux": "roe_muscl"},
+        "sgs": {"model": "none"}, "wall_model": {"type": "none"}, "numerics": {"flux": "roe_muscl", "limiter": "none"},
         "solver": {"mode": "rans"},
         "rans": {"turbulence": "sa", "max_iterations": max_iterations, "tolerance": 1e-10},
         "boundaries": BCS[fmt],

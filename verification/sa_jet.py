@@ -88,7 +88,7 @@ def run(level: int, partitions: int = 1, max_iterations: int = 3000):
     s = Solver(config_from_dict({
         "grid": {"file": f"{grid}.p3dfmt", "nmf": f"{grid}.nmf"},
         "flow": {"mach": MACH, "reynolds": 5e4, "temperature": 300.0},
-        "sgs": {"model": "none"}, "wall_model": {"type": "none"}, "numerics": {"flux": "roe_muscl"},
+        "sgs": {"model": "none"}, "wall_model": {"type": "none"}, "numerics": {"flux": "roe_muscl", "limiter": "none"},
         "solver": {"mode": "rans"},
         "rans": {"turbulence": "sa", "max_iterations": max_iterations, "tolerance": 1e-10},
         "boundaries": BCS,

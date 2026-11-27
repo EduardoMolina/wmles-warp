@@ -10,7 +10,7 @@ grid:
 
 flow: {mach: 0.2, reynolds: 5.0e+6, temperature: 300.0, ref_length: 1.0}
 
-numerics: {precision: float64, flux: roe_muscl}
+numerics: {precision: float64, flux: roe_muscl, limiter: none}  # unlimited kappa = 1/3, as the TMR codes
 
 sgs: {model: none}
 wall_model: {type: none}

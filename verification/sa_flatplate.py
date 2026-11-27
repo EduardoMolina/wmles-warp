@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from wmles_wrap.config import config_from_dict
 from wmles_wrap.parallel.devices import init_warp
@@ -55,7 +56,7 @@ def read_tmr(name: str) -> dict[str, dict[int, float]]:
     return out
 
 
-def run(level: int, partitions: int = 1, max_iterations: int = 1000, order: int = 2):
+def run(level: int, partitions: int = 1, max_iterations: int = 1000, rans: dict | None = None, order: int = 2):
     grid = GRIDS[level]
     tmp = Path(tempfile.mkdtemp())
     fmt = "cgns" if level == 0 else "plot3d"
@@ -66,7 +67,7 @@ def run(level: int, partitions: int = 1, max_iterations: int = 1000, order: int 
         "flow": {"mach": 0.2, "reynolds": 5e6, "temperature": 300.0},
         "sgs": {"model": "none"}, "wall_model": {"type": "none"}, "numerics": {"flux": "roe_muscl", "limiter": "none"},
         "solver": {"mode": "rans"},
-        "rans": {"turbulence": "sa", "max_iterations": max_iterations, "tolerance": 1e-10},
+        "rans": {"turbulence": "sa", "max_iterations": max_iterations, "tolerance": 1e-10, **(rans or {})},
         "boundaries": BCS[fmt],
         "run": {"log_every": 10**6}, "output": {"dir": str(tmp / "out")},
         "parallel": {"devices": ["cpu"], "partitions": partitions}}, case_dir=TMR))
@@ -84,13 +85,14 @@ def run(level: int, partitions: int = 1, max_iterations: int = 1000, order: int 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--levels", default="4,3,2,1")
+    ap.add_argument("--rans", default="{}", help="extra rans settings (YAML), e.g. '{linear_solver: fgmres}'")
     ap.add_argument("--order", type=int, default=2, help="wall-shear evaluation: 1 first cell, 2 two cells")
     args = ap.parse_args()
     init_warp()
     ref_cf, ref_cd = read_tmr("cf_convergence.dat"), read_tmr("drag_convergence.dat")
     print(f"{'N':>7} {'iters':>5} {'Cf(0.97)':>11} {'CFL3D':>11} {'FUN3D':>11} {'C_D':>11} {'CFL3D':>11} {'FUN3D':>11}")
     for lev in (int(v) for v in args.levels.split(",")):
-        n, cf, cd, it, ok, dt = run(lev, order=args.order)
+        n, cf, cd, it, ok, dt = run(lev, order=args.order, rans=yaml.safe_load(args.rans))
         print(f"{n:7d} {it:5d} {cf:11.5e} {ref_cf['CFL3D'][n]:11.5e} {ref_cf['FUN3D'][n]:11.5e} "
               f"{cd:11.5e} {ref_cd['CFL3D'][n]:11.5e} {ref_cd['FUN3D'][n]:11.5e}" + ("" if ok else "  (not converged)")
               + f"  {dt:.0f} s")

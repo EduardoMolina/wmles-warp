@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from wmles_wrap.config import config_from_dict
 from wmles_wrap.parallel.devices import init_warp
@@ -53,7 +54,7 @@ def read_reference() -> dict[tuple[str, float], dict[int, float]]:
     return out
 
 
-def run(level: int, partitions: int = 1, max_iterations: int = 1500):
+def run(level: int, partitions: int = 1, max_iterations: int = 1500, rans: dict | None = None):
     grid = GRIDS[level]
     fmt = "cgns" if level == 1 else "plot3d"
     gcfg = ({"file": f"{grid}.cgns", "format": "cgns"} if fmt == "cgns"
@@ -64,7 +65,7 @@ def run(level: int, partitions: int = 1, max_iterations: int = 1500):
         "flow": {"mach": 0.2, "reynolds": 3e6, "temperature": 300.0},
         "sgs": {"model": "none"}, "wall_model": {"type": "none"}, "numerics": {"flux": "roe_muscl", "limiter": "none"},
         "solver": {"mode": "rans"},
-        "rans": {"turbulence": "sa", "max_iterations": max_iterations, "tolerance": 1e-10},
+        "rans": {"turbulence": "sa", "max_iterations": max_iterations, "tolerance": 1e-10, **(rans or {})},
         "boundaries": BCS[fmt],
         "run": {"log_every": 10**6}, "output": {"dir": str(tmp / "out")},
         "parallel": {"devices": ["cpu"], "partitions": partitions}}, case_dir=TMR))
@@ -80,13 +81,14 @@ def run(level: int, partitions: int = 1, max_iterations: int = 1500):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--levels", default="4,3,2")
+    ap.add_argument("--rans", default="{}", help="extra rans settings (YAML), e.g. '{linear_solver: fgmres}'")
     args = ap.parse_args()
     init_warp()
     ref = read_reference()
     print(f"{'N':>7} {'iters':>5} " + " ".join(f"{'Cf(' + str(x)[:6] + ')':>12} {'CFL3D':>10} {'FUN3D':>10}"
                                              for x in XS))
     for lev in (int(v) for v in args.levels.split(",")):
-        n, cfs, _, it, ok, dt = run(lev)
+        n, cfs, _, it, ok, dt = run(lev, rans=yaml.safe_load(args.rans))
         row = f"{n:7d} {it:5d} "
         for x, c in zip(XS, cfs):
             row += f"{c:12.5e} {ref[('CFL3D', x)].get(n, np.nan):10.5e} {ref[('FUN3D', x)].get(n, np.nan):10.5e} "

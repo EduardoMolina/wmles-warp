@@ -56,7 +56,7 @@ At 64³ the curves move toward the DNS, but none has converged: all peak about 1
 | Wall-face diagnostics: force monitor, mean surface samples (p, τ_w, q) assembled across partitions, time-based sampling, statistics and wall-model state carried through a restart onto a different partitioning | `tests/test_wall_stats.py` | force equals a host recomputation to 1e-12; surface means equal the host averages; the restarted run reproduces the uninterrupted statistics to 1e-12 |
 | A-airfoil near stall (α = 13.3°, Re_c = 1e7, M = 0.15), reference WRLES Tamaki & Kawai (AIAA J. 2023) | `cases/a_airfoil/case.yaml`, `cases/a_airfoil/coarsen.py`, `airfoil_surface.py` | set up. CPU smoke test on a 4×2×9-coarsened grid (516 k cells, 6 partitions): connectivity (wake cut, 3 block joins, spanwise periodicity) correct, GCL 1e-16, stable for 3000 steps (0.1 CTU) of the impulsive start, residuals down about 20×. Production run (36.7 M cells, 30 CTU, averaging over the last 10) pending on the GPU node |
 
-## RANS-SA (docs/plan_rans.md stages R0–R2)
+## RANS-SA (docs/plan_rans.md stages R0–R4)
 
 | Study | Script / test | Result |
 |---|---|---|
@@ -69,6 +69,7 @@ At 64³ the curves move toward the DNS, but none has converged: all peak about 1
 | TMR coarse-grid regressions (2DCJ 1280 cells, 2DB 89×41, NACA 0012 II.7) | `tests/test_tmr.py` | 2DCJ centreline u within 0.0015 a_ref of CFL3D; 2DB C_f within 1.5 % of CFL3D |
 | TMR open BCs: inflow_total (p0, T0, direction, R+), back pressure; linearized ghosts vs FD Jacobian; wall data | `tests/test_open_bcs.py` | conditions to 1e-12; boundary blocks within 6 % of FD (85 % with frozen ghosts) |
 | TMR NACA 0012, α = 10°, SA, family II | `sa_naca0012.py` | see below |
+| FGMRES / Jacobian-free Newton–Krylov (R4): operator solve, product vs central differences, coupled SA, partitioning | `tests/test_krylov.py`; `--rans '{linear_solver: fgmres}'` on the `sa_*.py` scripts | true linear residual 1e-9; product within 1e-6; bitwise partition-independent; 2DZP SA 526/245/246 → 79/89/126 iterations, same C_f (CPU wall time not lower yet, plan_rans.md R4) |
 
 All TMR runs use `numerics.flux: roe_muscl` with `numerics.limiter: none` (unlimited κ = 1/3 MUSCL, as
 CFL3D runs these subsonic cases). The default van Albada limiter clips smooth peaks: on the NACA 0012

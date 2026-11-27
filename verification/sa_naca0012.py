@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from wmles_wrap.config import config_from_dict
 from wmles_wrap.parallel.devices import init_warp
@@ -78,7 +79,7 @@ def forces(s, alpha=ALPHA):
     return {"CL": F @ lift / q, "CD": F @ drag / q, "CDp": Fp @ drag / q, "CDv": Fv @ drag / q, "CMy": My / q}
 
 
-def run(level: int, partitions: int = 1, max_iterations: int = 3000):
+def run(level: int, partitions: int = 1, max_iterations: int = 3000, rans: dict | None = None):
     grid = f"n0012familyII.{level}"
     tmp = Path(tempfile.mkdtemp())
     s = Solver(config_from_dict({
@@ -86,7 +87,7 @@ def run(level: int, partitions: int = 1, max_iterations: int = 3000):
         "flow": {"mach": 0.15, "reynolds": 6e6, "temperature": 300.0, "beta": ALPHA},
         "sgs": {"model": "none"}, "wall_model": {"type": "none"}, "numerics": {"flux": "roe_muscl", "limiter": "none"},
         "solver": {"mode": "rans"},
-        "rans": {"turbulence": "sa", "max_iterations": max_iterations, "tolerance": 1e-10},
+        "rans": {"turbulence": "sa", "max_iterations": max_iterations, "tolerance": 1e-10, **(rans or {})},
         "boundaries": BCS,
         "run": {"log_every": 10**6}, "output": {"dir": str(tmp / "out")},
         "parallel": {"devices": ["cpu"], "partitions": partitions}}, case_dir=TMR))
@@ -102,11 +103,12 @@ def run(level: int, partitions: int = 1, max_iterations: int = 3000):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--levels", default="7,6,5")
+    ap.add_argument("--rans", default="{}", help="extra rans settings (YAML), e.g. '{linear_solver: fgmres}'")
     args = ap.parse_args()
     init_warp()
     ref = read_reference()
     for lev in (int(v) for v in args.levels.split(",")):
-        n, nodes, c, it, ok, dt = run(lev)
+        n, nodes, c, it, ok, dt = run(lev, rans=yaml.safe_load(args.rans))
         print(f"family II.{lev}: {n} cells, {it} iterations{'' if ok else ' (not converged)'}, {dt:.0f} s")
         print(f"  {'':10s}" + "".join(f"{k:>12s}" for k in KEYS))
         print(f"  {'ours':10s}" + "".join(f"{c[k]:12.6f}" for k in KEYS))

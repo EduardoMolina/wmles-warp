@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from wmles_wrap.config import config_from_dict
 from wmles_wrap.parallel.devices import init_warp
@@ -82,7 +83,7 @@ def centreline(s):
     return x[o], u[o]
 
 
-def run(level: int, partitions: int = 1, max_iterations: int = 3000):
+def run(level: int, partitions: int = 1, max_iterations: int = 3000, rans: dict | None = None):
     grid = f"shear_{level}levelsdown"
     tmp = Path(tempfile.mkdtemp())
     s = Solver(config_from_dict({
@@ -90,7 +91,7 @@ def run(level: int, partitions: int = 1, max_iterations: int = 3000):
         "flow": {"mach": MACH, "reynolds": 5e4, "temperature": 300.0},
         "sgs": {"model": "none"}, "wall_model": {"type": "none"}, "numerics": {"flux": "roe_muscl", "limiter": "none"},
         "solver": {"mode": "rans"},
-        "rans": {"turbulence": "sa", "max_iterations": max_iterations, "tolerance": 1e-10},
+        "rans": {"turbulence": "sa", "max_iterations": max_iterations, "tolerance": 1e-10, **(rans or {})},
         "boundaries": BCS,
         "run": {"log_every": 10**6}, "output": {"dir": str(tmp / "out")},
         "parallel": {"devices": ["cpu"], "partitions": partitions}}, case_dir=TMR))
@@ -112,13 +113,14 @@ def run(level: int, partitions: int = 1, max_iterations: int = 3000):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--levels", default="4,3,2")
+    ap.add_argument("--rans", default="{}", help="extra rans settings (YAML), e.g. '{linear_solver: fgmres}'")
     args = ap.parse_args()
     init_warp()
     conv, prof = read_reference()
     print(f"{'N':>7} {'iters':>5} {'C_D':>11} {'CFL3D':>11} {'FUN3D':>11}  "
           + "  ".join(f"{'u(' + str(x) + ')':>13} {'CFL3D':>8} {'FUN3D':>8}" for x in XS))
     for lev in (int(v) for v in args.levels.split(",")):
-        n, cd, us, (xc, uc), it, ok, dt = run(lev)
+        n, cd, us, (xc, uc), it, ok, dt = run(lev, rans=yaml.safe_load(args.rans))
         ref = {c: conv[c].get(n, (np.nan,) * 4) for c in ("CFL3D", "FUN3D")}
         row = f"{n:7d} {it:5d} {cd:11.5e} {ref['CFL3D'][0]:11.5e} {ref['FUN3D'][0]:11.5e}  "
         row += "  ".join(f"{u:13.6f} {ref['CFL3D'][i + 1]:8.6f} {ref['FUN3D'][i + 1]:8.6f}" for i, u in enumerate(us))

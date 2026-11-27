@@ -23,7 +23,7 @@ LES roadmap is in [plan.md](plan.md), and code conventions are in [CLAUDE.md](..
 | R1 | Pseudo-time implicit core (mixed-precision defect correction, line relaxation) | done (laminar; branch `rans-r0`) |
 | R2 | Dissipative steady residual, then the SA model (negative-SA) | done (branch `rans-r2`) |
 | R3 | TMR verification: flat plate (2DZP), coflowing jet (2DCJ), bump (2DB), then NACA 0012 | in progress (branch `rans-r3`): TMR open BCs, unlimited κ-MUSCL; 2DZP, 2DB, 2DCJ, NACA 0012 α = 10° done (2DB ~0.5 % offsets open) |
-| R4 | Acceleration: FGMRES and/or FAS multigrid | not started |
+| R4 | Acceleration: FGMRES and/or FAS multigrid | in progress (branch `rans-r4`): FGMRES (Jacobian-free or on the line operator), coupled (Q, ν̃) Newton–Krylov; multigrid open |
 | R5 | Production steady RANS: NASA CRM (DPW-5/6) | not started |
 | R6 | Dual-time stepping (URANS) | not started |
 | R7 | DDES / IDDES | not started |
@@ -328,6 +328,54 @@ against h = 1/√N.
 - FGMRES with the line Gauss–Seidel preconditioner. The outer residual is FP64; the Krylov
   vectors are FP32 with a small restart length, to fit 24 GB.
 - And/or geometric FAS multigrid on the structured blocks.
+
+**Done (first increment, [numerics/krylov.py](../src/wmles_wrap/numerics/krylov.py)):**
+`rans.linear_solver: fgmres` (default `relax` = the R1–R3 defect correction).
+- Right-preconditioned flexible GMRES, one cycle of `krylov_restart` (10) vectors, stop at a
+  relative drop `krylov_tolerance` (0.1). Preconditioner: `krylov_sweeps` (4; 0 = adaptive) line
+  sweeps from zero on the approximate operator. Krylov vectors in the solve precision.
+- `krylov_matvec: jfnk` (default): J z = V/Δτ z − (R(Q + εz) − R(Q))/ε with the full FP64
+  residual; ε sets the largest relative change of a variable to `fd_epsilon` (1e-7). With SA the
+  unknowns are **coupled (Q, ν̃)**: the perturbation includes ν̃, the product includes R_ν̃, and the
+  preconditioner is block diagonal (mean-flow and SA line solves). `operator`: the product with the
+  approximate operator (`k_apply`), which only accelerates the inner solve; SA stays segregated.
+- Inner product weighted by (V/Δτ · ref)⁻², so a residual counts as the pseudo-time update it
+  causes. Sums run along whole lines on the device (float64) and over lines on the host in
+  parent-block order: every dot product, and the whole iteration, is **bitwise independent of the
+  partitioning** (tested for both products, and for coupled SA).
+- Stagnation guard: a cycle that reduces the linear residual by less than `krylov_stall` (0.99)
+  takes the plain preconditioner step (one defect-correction step) instead.
+- Tests ([tests/test_krylov.py](../tests/test_krylov.py)): FGMRES reaches 1e-9 on the operator
+  system (true residual); the Jacobian-free product matches central differences of the residual to
+  1e-6; partition independence; coupled SA on 2DZP 35×25.
+
+**Findings:**
+- Segregated SA cannot follow Newton-size mean-flow steps: mean-flow-only JFNK stalled on 2DZP at a
+  2e-3 drop (ν̃ at 4e-3). Coupled, it converges.
+- Outer iterations (relax → JFNK, same converged C_f/C_D to 6 digits): laminar plate (test grid)
+  60 → 13; 2DZP SA 816 / 3 264 / 13 056 cells 526 / 245 / 246 → 79 / 89 / 126 (4 sweeps).
+  On laminar 2DZP at Re = 5e6 relax reaches only 8.8e-7 in 600 iterations; JFNK converges in 142.
+- **GMRES(10) stagnation on 2DB:** on 89×41 the linear drop is exactly 1.00 from a 4.5e-7 outer drop
+  on (zero correction). Not a bug: 30 vectors converge in 78 iterations, 16 sweeps in 76, 20
+  vectors in 90. The line preconditioner hardly couples cells across the lines (x along the top
+  symmetry plane, the duct mode between the total-pressure inflow and the back pressure), the same
+  weakness the R3 2DB notes found for relax. Hence the stagnation guard.
+- **CPU wall time is not better yet.** Each Krylov vector costs one residual + SA residual and the
+  preconditioner sweeps; JFNK needs ~8 vectors per outer iteration at CFL 10⁴. 2DZP 13 056 cells:
+  26 s vs 19 s (relax); 2DB 177×81: 104–134 s vs 27 s (relax). FGMRES on the operator is break-even
+  (2DZP 13 056: 19 s vs 19 s; 2DB 177×81: 37 s vs 27 s), and on 2DB 353×161 much worse: 1060
+  iterations, 669 s vs 397, 207 s (4 fixed sweeps × 10 vectors is less inner work than relax's
+  adaptive ≤ 128 sweeps, which this grid needs). JFNK on 353×161 not measured yet. Profile (2DZP 13 056, JFNK): 47 %
+  preconditioner sweeps, 36 % residual evaluations, 8 % dot products and vector updates.
+
+**Next:**
+- GPU timing on g6e: the per-line sweeps parallelize worse than the residual, so the balance differs.
+- A preconditioner that couples across the lines: a coarse-grid (agglomeration/FAS) correction, or
+  lines in a second direction. This is what both relax and FGMRES lack on 2DB.
+- Switch from relax to JFNK at a residual drop (relax is cheap and robust early; JFNK pays off
+  in the final phase) and an ε/forcing-term (Eisenstat–Walker) study.
+- Krylov memory at m = 10 is 21 FP32 vec5 arrays (420 B/cell, 504 coupled): over the R5 budget of
+  ~700 B/cell, so production needs m ≈ 5 or FP16 storage.
 
 ### R5: production steady RANS on the transonic NASA CRM
 

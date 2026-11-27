@@ -221,6 +221,17 @@ class RansCfg:
     # acoustic waves and of the entropy/shear waves
     jacobian_entropy_fix: float = 0.2
     jacobian_entropy_fix_linear: float = 0.05
+    # linear solver per outer iteration (numerics/krylov.py): relax = line relaxation only (defect
+    # correction) | fgmres = FGMRES preconditioned by line sweeps
+    linear_solver: str = "relax"
+    # fgmres: jfnk = Jacobian-free product with the full residual (inexact Newton) | operator = the
+    # approximate first-order operator (only accelerates the inner solve)
+    krylov_matvec: str = "jfnk"
+    krylov_restart: int = 10  # Krylov vectors (2 m + 1 arrays of vec5 in the solve precision)
+    krylov_tolerance: float = 0.1  # relative drop of the linear residual
+    krylov_sweeps: int = 4  # line sweeps per preconditioner application (0: adaptive, as relax)
+    fd_epsilon: float = 1.0e-7  # jfnk: largest perturbation of Q relative to the free-stream scales
+    krylov_stall: float = 0.99  # a cycle with less drop takes the preconditioner (defect-correction) step
 
 
 @dataclass
@@ -411,6 +422,14 @@ def _validate(cfg: CaseConfig) -> None:
         raise ConfigError("rans.jacobian_entropy_fix(_linear) must be >= 0")
     if cfg.rans.implicit_dissipation < 0:
         raise ConfigError("rans.implicit_dissipation must be >= 0")
+    choice(cfg.rans.linear_solver, ("relax", "fgmres"), "rans.linear_solver")
+    choice(cfg.rans.krylov_matvec, ("jfnk", "operator"), "rans.krylov_matvec")
+    if cfg.rans.krylov_restart < 1 or cfg.rans.krylov_sweeps < 0:
+        raise ConfigError("rans.krylov_restart must be >= 1 and rans.krylov_sweeps >= 0")
+    if not 0 <= cfg.rans.krylov_tolerance < 1 or cfg.rans.fd_epsilon <= 0:
+        raise ConfigError("rans.krylov_tolerance must be in [0, 1) and rans.fd_epsilon > 0")
+    if not 0 < cfg.rans.krylov_stall <= 1:
+        raise ConfigError("rans.krylov_stall must be in (0, 1]")
     if not 0 < cfg.rans.relax_limit < 1:
         raise ConfigError("rans.relax_limit must be in (0, 1)")
     if cfg.rans.turbulence != "none" and cfg.solver.mode != "rans":

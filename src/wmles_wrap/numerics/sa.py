@@ -514,8 +514,13 @@ class SAModel:
         return float(np.sqrt(tot / max(n, 1))) / self.nut_inf
 
     def implicit_step(self, cfl: float, rcfg, zebra: bool) -> None:
-        from .implicit import sweep_converged
+        """Segregated scalar backward-Euler step: assemble, line sweeps, nut += dnut."""
+        self.assemble(cfl)
+        self.relax(rcfg, zebra)
+        self.update()
 
+    def assemble(self, cfl: float) -> None:
+        """Scalar line blocks from the state of the last Integrator.rhs; zeroes dnut."""
         s, ng = self.s, self.s.ng
         dw = s.wall_distance().d
         P = s.integrator.params
@@ -528,8 +533,20 @@ class SAModel:
                       outputs=[self.D[sid], self.L[sid], self.U[sid]], device=d.sub.device)
             self.dn[sid].zero_()
             self.dn2[sid].zero_()
-        for sweep in range(rcfg.sweeps):
-            check = sweep + 1 >= rcfg.min_sweeps
+
+    def relax(self, rcfg, zebra: bool, rhs: dict | None = None, sweeps: int | None = None) -> int:
+        """Line sweeps on the assembled scalar system with right-hand side ``rhs`` (sub id ->
+        interior array in the residual precision; default the residual R_nut), starting from the
+        current dnut. ``sweeps`` None: adaptive, as the mean flow. Returns the number of sweeps."""
+        from .implicit import sweep_converged
+
+        s, ng = self.s, self.s.ng
+        P = s.integrator.params
+        rhs = self.R if rhs is None else rhs
+        fixed = sweeps is not None
+        done = 0
+        for sweep in range(sweeps if fixed else rcfg.sweeps):
+            check = (not fixed) and sweep + 1 >= rcfg.min_sweeps
             if check and zebra:
                 for sid in self.dn:
                     wp.copy(self.dn2[sid], self.dn[sid])
@@ -539,14 +556,19 @@ class SAModel:
                     out = self.dn[sid] if zebra else self.dn2[sid]
                     wp.launch(self.k_line, dim=L.dims,
                               inputs=[d.W, self.nut[sid], m.xc, m.Si, m.Sj, m.Sk, ng, wp.vec3i(*d.sub.nc), L.la,
-                                      L.fcode, P, self.D[sid], self.L[sid], self.U[sid], self.R[sid], self.dn[sid],
+                                      L.fcode, P, self.D[sid], self.L[sid], self.U[sid], rhs[sid], self.dn[sid],
                                       color, L.offset, self.G[sid], self.Y[sid]],
                               outputs=[out], device=d.sub.device)
                 if not zebra:
                     self.dn, self.dn2 = self.dn2, self.dn
                 s.halo.exchange(self.dn, stages=(0,))
+            done = sweep + 1
             if check and sweep_converged([(self.dn[i], self.dn2[i]) for i in self.dn], ng, rcfg.sweep_tolerance):
                 break
+        return done
+
+    def update(self) -> None:
+        s, ng = self.s, self.s.ng
         for sid, d in s.integrator.data.items():
             wp.launch(self.k_update, dim=d.sub.nc, inputs=[self.dn[sid], ng], outputs=[self.nut[sid]],
                       device=d.sub.device)

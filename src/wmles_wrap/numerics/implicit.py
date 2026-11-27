@@ -397,6 +397,7 @@ def implicit_kernels(mp: MixedPrecision):
         D: wp.array3d(dtype=m55),
         Lo: wp.array3d(dtype=m55),
         Up: wp.array3d(dtype=m55),
+        dts: wp.array3d(dtype=s),
     ):
         a0, b0, c0 = wp.tid()
         idx = wp.vec3i(a0 + ng, b0 + ng, c0 + ng)
@@ -451,6 +452,57 @@ def implicit_kernels(mp: MixedPrecision):
         D[idx[0], idx[1], idx[2]] = Dm + dsc * wp.identity(n=5, dtype=s)
         Lo[idx[0], idx[1], idx[2]] = lo_b
         Up[idx[0], idx[1], idx[2]] = up_b
+        dts[idx[0], idx[1], idx[2]] = dsc
+
+    @wp.kernel(module="unique")
+    def k_apply(
+        W: wp.array3d(dtype=rv5),
+        mut: wp.array3d(dtype=rs),
+        Si: wp.array3d(dtype=rv3),
+        Sj: wp.array3d(dtype=rv3),
+        Sk: wp.array3d(dtype=rv3),
+        vol: wp.array3d(dtype=rs),
+        ng: int,
+        nc: wp.vec3i,
+        la: int,
+        fcode: wp.array(dtype=int),
+        p: Params,
+        jc: v4,
+        D: wp.array3d(dtype=m55),
+        Lo: wp.array3d(dtype=m55),
+        Up: wp.array3d(dtype=m55),
+        x: wp.array3d(dtype=v5),
+        y: wp.array3d(dtype=v5),
+    ):
+        """y = A x with the operator that k_line relaxes (x needs current interface ghosts)."""
+        a0, b0, c0 = wp.tid()
+        idx = wp.vec3i(a0 + ng, b0 + ng, c0 + ng)
+        Wi = to_s5(W[idx[0], idx[1], idx[2]])
+        Vi = s(vol[idx[0], idx[1], idx[2]])
+        r = D[idx[0], idx[1], idx[2]] * x[idx[0], idx[1], idx[2]]
+        for a in range(3):
+            for side in range(2):
+                nb = wp.vec3i(idx[0], idx[1], idx[2])
+                if side == 0:
+                    nb[a] = nb[a] - 1
+                else:
+                    nb[a] = nb[a] + 1
+                inside = nb[a] >= ng and nb[a] < ng + nc[a]
+                code = fcode[2 * a + side]
+                xj = x[nb[0], nb[1], nb[2]]
+                if a == la and inside:
+                    if side == 0:
+                        r = r + Lo[idx[0], idx[1], idx[2]] * xj
+                    else:
+                        r = r + Up[idx[0], idx[1], idx[2]] * xj
+                elif inside or code < 0:
+                    S = face_S(Si, Sj, Sk, idx, a, side)
+                    Wj = to_s5(W[nb[0], nb[1], nb[2]])
+                    Vj = s(vol[nb[0], nb[1], nb[2]])
+                    mf = half * s(mut[idx[0], idx[1], idx[2]] + mut[nb[0], nb[1], nb[2]])
+                    K = visc_K(Wi, Wj, S, Vi, Vj, mf, p)
+                    r = r + off_vec(Wi, Wj, S, K, xj, jc, p)
+        y[idx[0], idx[1], idx[2]] = r
 
     @wp.kernel(module="unique")
     def k_line(
@@ -550,7 +602,7 @@ def implicit_kernels(mp: MixedPrecision):
             alpha = r_half * alpha
         U[i, j, k] = Uc + alpha * d
 
-    return k_assemble, k_line, k_update
+    return k_assemble, k_line, k_update, k_apply
 
 
 def sweep_converged(pairs, ng: int, tol: float) -> bool:
@@ -611,6 +663,7 @@ class _Lines:
     rhs: wp.array
     dq: wp.array
     dq2: wp.array
+    dts: wp.array  # V / dtau per cell
 
 
 class ImplicitSolver:
@@ -620,7 +673,7 @@ class ImplicitSolver:
         self.s = solver
         self.cfg = solver.cfg.rans
         self.mp = get_mixed(solver.prec.name, self.cfg.solve_precision)
-        self.k_assemble, self.k_line, self.k_update = implicit_kernels(self.mp)
+        self.k_assemble, self.k_line, self.k_update, self.k_apply = implicit_kernels(self.mp)
         self.k_rhs, _ = mixed_kernels(self.mp)
         self.I = solver.integrator
         self.jacobian = jacobian_type(solver.cfg)
@@ -640,12 +693,18 @@ class ImplicitSolver:
             self.lines[sid] = _Lines(
                 la=lay.la, dims=lay.dims, offset=lay.offset, fcode=lay.fcode,
                 D=z(sp.mat55), Lo=z(sp.mat55), Up=z(sp.mat55), G=z(sp.mat55), Y=z(sp.vec5),
-                rhs=z(sp.vec5), dq=z(sp.vec5), dq2=z(sp.vec5))
+                rhs=z(sp.vec5), dq=z(sp.vec5), dq2=z(sp.vec5), dts=z(sp.scalar))
         self.turb = solver.turbulence
         self.res0_turb = None
         st = self.I.params.w_inf
         rho, u, v, w, pr = (float(x) for x in st)
         self.ref = np.array([rho, rho, rho, rho, pr / (solver.gas.gamma - 1.0) + 0.5 * rho * (u * u + v * v + w * w)])
+        self.krylov = None
+        if self.cfg.linear_solver == "fgmres":
+            from .krylov import FGMRES
+
+            self.krylov = FGMRES(self)
+        self.last_linear = 0
 
     # ---- one outer iteration ---------------------------------------------------------------
     def residual_norm(self) -> tuple[float, np.ndarray]:
@@ -670,7 +729,7 @@ class ImplicitSolver:
             wp.launch(self.k_assemble, dim=d.sub.nc,
                       inputs=[d.W, d.mut, m.Si, m.Sj, m.Sk, m.vol, sc(cfl), ng, wp.vec3i(*d.sub.nc), L.la, L.fcode, P,
                               self.jc],
-                      outputs=[L.D, L.Lo, L.Up], device=dev)
+                      outputs=[L.D, L.Lo, L.Up, L.dts], device=dev)
             wp.launch(self.k_rhs, dim=d.sub.nc, inputs=[d.R, ng], outputs=[L.rhs], device=dev)
             L.dq.zero_()
             L.dq2.zero_()
@@ -730,12 +789,21 @@ class ImplicitSolver:
             self.res0 = res if res > 0 else 1.0
         cfl = self.cfl(res)
         self.assemble(cfl)
-        self.relax()
+        coupled = self.krylov is not None and self.krylov.coupled
+        if coupled:
+            self.turb.assemble(cfl)
+        if self.krylov is not None:
+            self.last_linear = self.krylov.solve()
+        else:
+            self.last_linear = self.relax()
         self.update()
         if self.turb is not None:
-            self.turb.implicit_step(cfl, self.cfg, self.cfg.smoother == "zebra")
+            if coupled:
+                self.turb.update()
+            else:
+                self.turb.implicit_step(cfl, self.cfg, self.cfg.smoother == "zebra")
         self.iteration += 1
-        self.history.append((self.iteration, cfl, res, per, rt))
+        self.history.append((self.iteration, cfl, res, per, rt, self.last_linear))
         return res
 
     def converged(self) -> bool:
@@ -756,6 +824,12 @@ class ImplicitSolver:
             rt = self.history[-1][4]
             if self.iteration % max(log_every, 1) == 0 or self.iteration == 1:
                 extra = f"  nut drop {rt / self.res0_turb:.3e}" if self.turb is not None else ""
+                if self.krylov is not None:
+                    kr = self.krylov
+                    extra += (f"  krylov {kr.iterations} ({kr.drop:.2e}, {kr.sweeps} sweeps"
+                              + (", stalled)" if kr.stalled else ")"))
+                else:
+                    extra += f"  sweeps {self.last_linear}"
                 log.info("iter %6d  cfl %9.4g  res %.6e  drop %.3e%s  (%.1f s)", self.iteration, self.history[-1][1],
                          res, res / self.res0, extra, _time.perf_counter() - t0)
             if not (math.isfinite(res) and math.isfinite(rt)):
@@ -769,8 +843,9 @@ class ImplicitSolver:
         return converged
 
     def write_history(self, path) -> None:
-        lines = ["# iter cfl res(scaled) rms(R/V): rho rhou rhov rhow rhoE; rms(R_nut/V)/nut_inf"]
-        for it, cfl, res, per, rt in self.history:
-            lines.append(f"{it:7d} {cfl:11.4e} {res:.10e} " + " ".join(f"{x:.6e}" for x in per) + f" {rt:.6e}")
+        lines = ["# iter cfl res(scaled) rms(R/V): rho rhou rhov rhow rhoE; rms(R_nut/V)/nut_inf; "
+                 "linear iterations (sweeps or Krylov vectors)"]
+        for it, cfl, res, per, rt, nl in self.history:
+            lines.append(f"{it:7d} {cfl:11.4e} {res:.10e} " + " ".join(f"{x:.6e}" for x in per) + f" {rt:.6e} {nl:4d}")
         with open(path, "w") as fh:
             fh.write("\n".join(lines) + "\n")

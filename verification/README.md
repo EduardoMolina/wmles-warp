@@ -93,8 +93,11 @@ two-cell wall derivative, converged to a 1e-10 residual drop:
 | 3 520 | 226 | 5.0596e-3 | 5.3364e-3 | 4.9695e-3 | 5.3556e-3 | 5.7348e-3 | 5.6779e-3 | 2.4640e-3 | 2.7536e-3 | 3.1110e-3 |
 | 14 080 | 243 | 5.2830e-3 | 5.2153e-3 | 5.1715e-3 | 5.8957e-3 | 6.0531e-3 | 5.9986e-3 | 2.5281e-3 | 2.7025e-3 | 2.7786e-3 |
 | 56 320 | 397 | 5.1568e-3 | 5.1889e-3 | 5.1906e-3 | 6.1019e-3 | 6.1231e-3 | 6.1055e-3 | 2.6537e-3 | 2.6840e-3 | 2.6995e-3 |
+| 225 280 | 663 | 5.1607e-3 | 5.1853e-3 | 5.1885e-3 | 6.1447e-3 | 6.1422e-3 | 6.1398e-3 | 2.6613e-3 | 2.6787e-3 | 2.6852e-3 |
 
-TMR finest grid (901 120 cells): 5.185e-3, 6.149e-3, 2.678e-3. On 353×161 C_f(0.75) is 0.06–0.35 %
-below FUN3D/CFL3D and C_f(0.868) 1.1–1.7 % below; the coarse grids are further off than CFL3D's and
-approach from below at x = 0.75 and 0.868. The 705×321 grid (CGNS, `--levels 1`) is still to run.
-The 353×161 grid needed 1457 iterations with the former 32-sweep cap (see plan_rans.md, R3, 2DB convergence).
+TMR finest grid (901 120 cells): 5.185e-3, 6.149e-3, 2.678e-3. On 705×321 (CGNS, `--levels 1`, 31 min
+on one CPU core) C_f(0.75) is within 0.1 % of CFL3D and FUN3D on the same grid, but C_f(0.632) stays
+0.5 % and C_f(0.868) 0.6–0.9 % below them; with the 353×161 values, Richardson estimates are about
+5.162e-3, 6.159e-3 and 2.664e-3, i.e. −0.45 %, +0.16 % and −0.5 % from the TMR fine-grid values. Open:
+the cause of the ~0.5 % offsets upstream and downstream of the bump crest. The 353×161 grid needed
+1457 iterations with the former 32-sweep cap (see plan_rans.md, R3, 2DB convergence).
